@@ -1,0 +1,858 @@
+/**
+ * Copyright 2026 Circle Internet Group, Inc.  All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { randomBytes } from "crypto";
+import {
+  http,
+  maxUint256,
+  zeroAddress,
+  pad,
+  createPublicClient,
+  erc20Abi,
+  type Address,
+  type Hash,
+  type Chain,
+} from "viem";
+import * as chains from "viem/chains";
+import { circleDeveloperSdk } from "@/lib/circle/developer-controlled-wallets-client";
+import {
+  Transaction,
+  Blockchain,
+  TransactionType,
+} from "@circle-fin/developer-controlled-wallets";
+
+export const GATEWAY_WALLET_ADDRESS = "0x0077777d7EBA4688BDeF3E311b846F25870A19B9";
+export const GATEWAY_MINTER_ADDRESS = "0x0022222ABE238Cc2C7Bb1f21003F0a260052475B";
+
+const arcRpcKey = process.env.ARC_TESTNET_RPC_KEY || 'c0ca2582063a5bbd5db2f98c139775e982b16919';
+
+export const arcTestnet = {
+  id: 5042002,
+  name: 'Arc Testnet',
+  nativeCurrency: { name: 'USD Coin', symbol: 'USDC', decimals: 6 },
+  rpcUrls: {
+    default: { http: [`https://rpc.testnet.arc.network/${arcRpcKey}`] },
+  },
+  blockExplorers: {
+    default: { name: 'Explorer', url: 'https://explorer.arc.testnet.circle.com' },
+  },
+  testnet: true,
+} as const satisfies Chain;
+
+export const USDC_ADDRESSES = {
+  ethSepolia: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
+  arcTestnet: "0x3600000000000000000000000000000000000000",
+  avalancheFuji: "0x5425890298aed601595a70ab815c96711a31bc65",
+  baseSepolia: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+} as const;
+
+export const TOKEN_IDS = {
+  arcTestnet: "15dc2b5d-0994-58b0-bf8c-3a0501148ee8",
+  sepolia: "d2177333-b33a-5263-b699-2a6a52722214",
+} as const;
+
+export const DOMAIN_IDS = {
+  ethSepolia: 0,
+  avalancheFuji: 1,
+  baseSepolia: 6,
+  arcTestnet: 26,
+} as const;
+
+export type SupportedChain = keyof typeof USDC_ADDRESSES;
+
+// Mapping for Circle API "blockchain" parameter
+export const CIRCLE_CHAIN_NAMES: Record<SupportedChain, string> = {
+  ethSepolia: "ETH-SEPOLIA",
+  avalancheFuji: "AVAX-FUJI",
+  baseSepolia: "BASE-SEPOLIA",
+  arcTestnet: "ARC-TESTNET",
+};
+
+export const CHAIN_BY_DOMAIN: Record<number, SupportedChain> = {
+  [DOMAIN_IDS.ethSepolia]: "ethSepolia",
+  [DOMAIN_IDS.avalancheFuji]: "avalancheFuji",
+  [DOMAIN_IDS.baseSepolia]: "baseSepolia",
+  [DOMAIN_IDS.arcTestnet]: "arcTestnet",
+} as const;
+
+function getChainConfig(chain: SupportedChain): Chain {
+  switch (chain) {
+    case "arcTestnet":
+      return arcTestnet;
+    case "avalancheFuji":
+      return chains.avalancheFuji;
+    case "baseSepolia":
+      return chains.baseSepolia;
+    case "ethSepolia":
+      return chains.sepolia;
+    default:
+      throw new Error(`Unsupported chain: ${chain}`);
+  }
+}
+
+const EIP712Domain = [
+  { name: "name", type: "string" },
+  { name: "version", type: "string" },
+] as const;
+
+const TransferSpec = [
+  { name: "version", type: "uint32" },
+  { name: "sourceDomain", type: "uint32" },
+  { name: "destinationDomain", type: "uint32" },
+  { name: "sourceContract", type: "bytes32" },
+  { name: "destinationContract", type: "bytes32" },
+  { name: "sourceToken", type: "bytes32" },
+  { name: "destinationToken", type: "bytes32" },
+  { name: "sourceDepositor", type: "bytes32" },
+  { name: "destinationRecipient", type: "bytes32" },
+  { name: "sourceSigner", type: "bytes32" },
+  { name: "destinationCaller", type: "bytes32" },
+  { name: "value", type: "uint256" },
+  { name: "salt", type: "bytes32" },
+  { name: "hookData", type: "bytes" },
+] as const;
+
+const BurnIntent = [
+  { name: "maxBlockHeight", type: "uint256" },
+  { name: "maxFee", type: "uint256" },
+  { name: "spec", type: "TransferSpec" },
+] as const;
+
+function addressToBytes32(address: Address): `0x${string}` {
+  return pad(address.toLowerCase() as Address, { size: 32 });
+}
+
+interface BurnIntentSpec {
+  version: number;
+  sourceDomain: number;
+  destinationDomain: number;
+  sourceContract: Address;
+  destinationContract: Address;
+  sourceToken: Address;
+  destinationToken: Address;
+  sourceDepositor: Address;
+  destinationRecipient: Address;
+  sourceSigner: Address;
+  destinationCaller: Address;
+  value: bigint;
+  salt: `0x${string}`;
+  hookData: `0x${string}`;
+}
+
+interface BurnIntentData {
+  maxBlockHeight: bigint;
+  maxFee: bigint;
+  spec: BurnIntentSpec;
+}
+
+function burnIntentTypedData(burnIntent: BurnIntentData) {
+  const domain = {
+    name: "GatewayWallet",
+    version: "1",
+  };
+  return {
+    types: { EIP712Domain, TransferSpec, BurnIntent },
+    domain,
+    primaryType: "BurnIntent" as const,
+    message: {
+      ...burnIntent,
+      spec: {
+        ...burnIntent.spec,
+        sourceContract: addressToBytes32(burnIntent.spec.sourceContract),
+        destinationContract: addressToBytes32(burnIntent.spec.destinationContract),
+        sourceToken: addressToBytes32(burnIntent.spec.sourceToken),
+        destinationToken: addressToBytes32(burnIntent.spec.destinationToken),
+        sourceDepositor: addressToBytes32(burnIntent.spec.sourceDepositor),
+        destinationRecipient: addressToBytes32(burnIntent.spec.destinationRecipient),
+        sourceSigner: addressToBytes32(burnIntent.spec.sourceSigner),
+        destinationCaller: addressToBytes32(burnIntent.spec.destinationCaller),
+      },
+    },
+  };
+}
+
+interface ChallengeResponse {
+  id: string;
+}
+
+async function waitForTransactionConfirmation(challengeId: string): Promise<Transaction> {
+  while (true) {
+    const response = await circleDeveloperSdk.getTransaction({ id: challengeId });
+    const tx = response.data?.transaction;
+
+    if (tx?.state === "CONFIRMED" || tx?.state === "COMPLETE") {
+      console.log(`Transaction ${challengeId} reached terminal state '${tx.state}' with hash: ${tx.txHash}`);
+      if (!tx.txHash) {
+        throw new Error(`Transaction ${challengeId} is ${tx.state} but txHash is missing.`);
+      }
+      return tx;
+    } else if (tx?.state === "FAILED") {
+      console.error("Circle API Error:", tx);
+      throw new Error(`Transaction ${challengeId} failed with reason: ${tx.errorReason}`);
+    }
+
+    console.log(`Transaction ${challengeId} state: ${tx?.state}. Polling again in 2s...`);
+    await new Promise(resolve => setTimeout(resolve, 2000));
+  }
+}
+
+async function initiateContractInteraction(
+  walletId: string,
+  contractAddress: Address,
+  abiFunctionSignature: string,
+  args: any[]
+): Promise<string> {
+  const response = await circleDeveloperSdk.createContractExecutionTransaction({
+    walletId,
+    contractAddress,
+    abiFunctionSignature,
+    abiParameters: args,
+    fee: {
+      type: "level",
+      config: {
+        feeLevel: "HIGH",
+      },
+    }
+  });
+
+  const responseData = response.data as unknown as ChallengeResponse;
+
+  if (!responseData?.id) {
+    console.error("Circle API Error: Challenge ID not found in response", response.data);
+    throw new Error("Circle API did not return a Challenge ID.");
+  }
+
+  return responseData.id;
+}
+
+/**
+ * Add EOA delegate for a depositor wallet
+ * This allows the EOA to sign burn intents on behalf of the depositor
+ */
+export async function addGatewayDelegate(
+  depositorWalletId: string,
+  delegateAddress: Address,
+  chain: SupportedChain
+): Promise<Transaction> {
+  const usdcAddress = USDC_ADDRESSES[chain];
+
+  console.log(`Adding delegate ${delegateAddress} for depositor wallet ${depositorWalletId}...`);
+  
+  const addDelegateChallengeId = await initiateContractInteraction(
+    depositorWalletId,
+    GATEWAY_WALLET_ADDRESS as Address,
+    "addDelegate(address,address)",
+    [usdcAddress, delegateAddress]
+  );
+
+  console.log(`Waiting for addDelegate transaction to confirm...`);
+  const delegateTx = await waitForTransactionConfirmation(addDelegateChallengeId);
+
+  console.log(`Delegate added successfully. TxHash: ${delegateTx.txHash}`);
+  return delegateTx;
+}
+
+export async function initiateDepositFromCustodialWallet(
+  walletId: string,
+  chain: SupportedChain,
+  amountInAtomicUnits: bigint,
+  delegateAddress?: Address
+): Promise<Transaction> {
+  const usdcAddress = USDC_ADDRESSES[chain];
+  let lastTx: Transaction | undefined = undefined;
+
+  // Step 2.5: Add delegate if provided (allows EOA to sign burn intents)
+  if (delegateAddress) {
+    console.log(`Step 2.5: Adding delegate ${delegateAddress} for this wallet...`);
+    lastTx = await addGatewayDelegate(walletId, delegateAddress, chain);
+  }
+
+  if (amountInAtomicUnits > BigInt(0)) {
+    console.log(`Step 1: Approving Gateway contract for wallet ${walletId}...`);
+    const approvalChallengeId = await initiateContractInteraction(
+      walletId,
+      usdcAddress as Address,
+      "approve(address,uint256)",
+      [GATEWAY_WALLET_ADDRESS, amountInAtomicUnits.toString()]
+    );
+
+    console.log(`Step 2: Waiting for approval transaction (Challenge ID: ${approvalChallengeId}) to confirm...`);
+    await waitForTransactionConfirmation(approvalChallengeId);
+
+    console.log(`Step 3: Calling deposit function on Gateway for wallet ${walletId}...`);
+    const depositChallengeId = await initiateContractInteraction(
+      walletId,
+      GATEWAY_WALLET_ADDRESS as Address,
+      "deposit(address,uint256)",
+      [usdcAddress, amountInAtomicUnits.toString()]
+    );
+
+    console.log(`Step 4: Waiting for deposit transaction (Challenge ID: ${depositChallengeId}) to confirm...`);
+    const depositTx = await waitForTransactionConfirmation(depositChallengeId);
+    console.log("Custodial deposit successful. Final TxHash:", depositTx.txHash);
+    return depositTx;
+  }
+
+  if (lastTx) {
+    return lastTx;
+  }
+
+  // If no delegate and no amount, there is nothing to do.
+  console.log("Skipping deposit and delegate registration as amount is 0 and no delegate is provided.");
+  // This is a bit of a workaround, but we need to return a Transaction object
+  // We can create a mock transaction object here.
+  return {
+    id: "",
+    txHash: "",
+    state: "COMPLETE",
+    blockchain: CIRCLE_CHAIN_NAMES[chain] as Blockchain,
+    walletId: walletId,
+    sourceAddress: "",
+    contractAddress: "",
+    transactionType: "CONTRACT_EXECUTION" as TransactionType,
+    custodyType: "DEVELOPER",
+    errorReason: undefined,
+    errorDetails: undefined,
+    amounts: [],
+    nfts: [],
+    networkFee: "",
+    operation: "CONTRACT_EXECUTION",
+    feeLevel: "HIGH",
+    refId: "",
+    abiFunctionSignature: "",
+    abiParameters: [],
+    createDate: new Date().toISOString(),
+    updateDate: new Date().toISOString(),
+  };
+}
+
+export async function submitBurnIntent(
+  burnIntent: any,
+  signature: `0x${string}`
+): Promise<{
+  attestation: `0x${string}`;
+  attestationSignature: `0x${string}`;
+  transferId: string;
+  fees: any;
+}> {
+  const payload = [
+    {
+      burnIntent: {
+        maxBlockHeight: burnIntent.maxBlockHeight.toString(),
+        maxFee: burnIntent.maxFee.toString(),
+        spec: {
+          ...burnIntent.spec,
+          value: burnIntent.spec.value.toString(),
+        },
+      },
+      signature,
+    },
+  ];
+
+  const response = await fetch("https://gateway-api-testnet.circle.com/v1/transfer", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Gateway API error: ${response.status} - ${errorText}`);
+  }
+
+  const data = await response.json();
+  const result = Array.isArray(data) ? data[0] : data;
+  return {
+    attestation: result.attestation as `0x${string}`,
+    attestationSignature: result.signature as `0x${string}`,
+    transferId: result.transferId,
+    fees: result.fees,
+  };
+}
+
+async function getCircleWalletAddress(walletId: string): Promise<Address> {
+  const response = await circleDeveloperSdk.getWallet({ id: walletId });
+  if (!response.data?.wallet?.address) {
+    throw new Error(`Could not fetch address for wallet ID: ${walletId}`);
+  }
+  return response.data.wallet.address as Address;
+}
+
+/**
+ * Get the Circle wallet ID for the EOA signer for the given source chain and user
+ */
+async function getSignerWalletIdForUser(
+  userId: string,
+  chain: SupportedChain
+): Promise<{ walletId: string; address: string }> {
+  const { getGatewayEOAWalletId } = await import("@/lib/circle/create-gateway-eoa-wallets");
+  
+  const chainMap: Record<SupportedChain, string> = {
+    ethSepolia: 'ETH-SEPOLIA',
+    baseSepolia: 'BASE-SEPOLIA',
+    avalancheFuji: 'AVAX-FUJI',
+    arcTestnet: 'ARC-TESTNET',
+  };
+
+  const blockchain = chainMap[chain];
+  return await getGatewayEOAWalletId(userId, blockchain);
+}
+
+async function signBurnIntentWithEOA(
+  burnIntentData: BurnIntentData,
+  sourceChain: SupportedChain,
+  userId: string
+): Promise<`0x${string}`> {
+  const typedData = burnIntentTypedData(burnIntentData);
+
+  const { walletId, address } = await getSignerWalletIdForUser(userId, sourceChain);
+
+  console.log("Signing burn intent with EOA:", address);
+
+  // Helper function to serialize BigInt values for JSON
+  const serializeBigInt = (obj: any): any => {
+    if (obj === null || obj === undefined) return obj;
+    if (typeof obj === "bigint") return obj.toString();
+    if (Array.isArray(obj)) return obj.map(serializeBigInt);
+    if (typeof obj === "object") {
+      const result: any = {};
+      for (const key in obj) {
+        result[key] = serializeBigInt(obj[key]);
+      }
+      return result;
+    }
+    return obj;
+  };
+
+  // Serialize BigInt values to strings for JSON
+  const serializedTypedData = serializeBigInt(typedData);
+
+  // Use Circle SDK to sign the typed data
+  const response = await circleDeveloperSdk.signTypedData({
+    walletId,
+    data: JSON.stringify(serializedTypedData),
+  });
+
+  if (!response.data?.signature) {
+    throw new Error("Failed to sign burn intent with Circle SDK");
+  }
+
+  return response.data.signature as `0x${string}`;
+}
+
+/**
+ * Execute mint on destination chain using Circle wallet
+ * @param walletAddress - Circle wallet address to execute the mint
+ * @param destinationChain - Destination chain
+ * @param attestation - Gateway attestation
+ * @param signature - Gateway attestation signature
+ */
+export async function executeMintCircle(
+  walletAddress: Address,
+  destinationChain: SupportedChain,
+  attestation: string,
+  signature: string
+): Promise<Transaction> {
+  const blockchain = CIRCLE_CHAIN_NAMES[destinationChain];
+  if (!blockchain) throw new Error(`No Circle blockchain mapping for ${destinationChain}`);
+
+  let response;
+  try {
+    response = await circleDeveloperSdk.createContractExecutionTransaction({
+      walletAddress,
+      blockchain,
+      contractAddress: GATEWAY_MINTER_ADDRESS,
+      abiFunctionSignature: "gatewayMint(bytes,bytes)",
+      abiParameters: [attestation, signature],
+      fee: {
+        type: "level",
+        config: { feeLevel: "MEDIUM" },
+      },
+    });
+  } catch (error: any) {
+    console.error("Circle API error during mint:", error?.response?.data || error.message);
+    throw new Error(`Failed to execute mint transaction: ${error?.response?.data?.message || error.message}`);
+  }
+
+  const challengeId = response.data?.id;
+  if (!challengeId) throw new Error("Failed to initiate minting challenge");
+
+  return await waitForTransactionConfirmation(challengeId);
+}
+/**
+ * Transfer Gateway balance using EOA wallet signing (no Circle wallet needed)
+ * @param depositorAddress - The address that deposited to Gateway (has the balance)
+ */
+export async function transferGatewayBalanceWithEOA(
+  userId: string,
+  amount: bigint,
+  sourceChain: SupportedChain,
+  destinationChain: SupportedChain,
+  recipientAddress: Address,
+  depositorAddress: Address
+): Promise<{
+  transferId: string;
+  attestation: `0x${string}`;
+  attestationSignature: `0x${string}`;
+}> {
+  // 1. Get EOA signer for source chain (used for signing only)
+  const { address } = await getSignerWalletIdForUser(userId, sourceChain);
+  const eoaSignerAddress = address as Address;
+
+  console.log(`Transferring ${Number(amount) / 1_000_000} USDC from Gateway`);
+  console.log(`  Depositor (has balance): ${depositorAddress}`);
+  console.log(`  Signer (signs burn): ${eoaSignerAddress}`);
+
+  // 2. Ensure domains are defined
+  const sourceDomain = DOMAIN_IDS[sourceChain];
+  const destinationDomain = DOMAIN_IDS[destinationChain];
+  
+  if (sourceDomain === undefined || destinationDomain === undefined) {
+    throw new Error(`Invalid chain configuration: source=${sourceChain}, destination=${destinationChain}`);
+  }
+
+  // 3. Construct Burn Intent
+  const burnIntentData: BurnIntentData = {
+    maxBlockHeight: maxUint256,
+    maxFee: BigInt(2_010_000), // Gateway requires at least 2.000005 USDC
+    spec: {
+      version: 1,
+      sourceDomain: sourceDomain,
+      destinationDomain: destinationDomain,
+      sourceContract: GATEWAY_WALLET_ADDRESS as Address,
+      destinationContract: GATEWAY_MINTER_ADDRESS as Address,
+      sourceToken: USDC_ADDRESSES[sourceChain] as Address,
+      destinationToken: USDC_ADDRESSES[destinationChain] as Address,
+      sourceDepositor: depositorAddress, // The wallet that deposited (has the balance)
+      destinationRecipient: recipientAddress,
+      sourceSigner: eoaSignerAddress, // EOA signs the burn intent
+      destinationCaller: zeroAddress,
+      value: amount,
+      salt: `0x${randomBytes(32).toString("hex")}` as `0x${string}`,
+      hookData: "0x" as `0x${string}`,
+    },
+  };
+
+  // 4. Sign Intent with EOA
+  const signature = await signBurnIntentWithEOA(burnIntentData, sourceChain, userId);
+
+  // 5. Submit to Gateway
+  const typedData = burnIntentTypedData(burnIntentData);
+
+  const { attestation, attestationSignature, transferId } = await submitBurnIntent(
+    typedData.message,
+    signature
+  );
+
+  console.log(`Gateway transfer submitted. ID: ${transferId}`);
+
+  // 6. Poll for attestation if not immediately available
+  let finalAttestation = attestation;
+  let finalSignature = attestationSignature;
+
+  if (!finalAttestation || !finalSignature) {
+    console.log(`Polling for attestation...`);
+    
+    let attempts = 0;
+    const maxAttempts = 60; // 3 minutes max
+    
+    while (attempts < maxAttempts) {
+      await new Promise((r) => setTimeout(r, 3000)); // Wait 3s
+
+      const pollResponse = await fetch(`https://gateway-api-testnet.circle.com/v1/transfers/${transferId}`);
+      const pollJson = await pollResponse.json();
+      const status = pollJson.status || pollJson.state;
+
+      console.log(`Transfer Status: ${status} (attempt ${attempts + 1}/${maxAttempts})`);
+
+      if (pollJson.attestation && pollJson.signature) {
+        finalAttestation = pollJson.attestation;
+        finalSignature = pollJson.signature;
+        console.log(`Attestation received!`);
+        break;
+      } else if (status === "FAILED") {
+        throw new Error(`Transfer failed: ${JSON.stringify(pollJson)}`);
+      }
+      
+      attempts++;
+    }
+    
+    if (!finalAttestation || !finalSignature) {
+      throw new Error(`Attestation not received after ${maxAttempts} attempts. Transfer ID: ${transferId}`);
+    }
+  }
+
+  return {
+    transferId,
+    attestation: finalAttestation as `0x${string}`,
+    attestationSignature: finalSignature as `0x${string}`,
+  };
+}
+
+export async function transferUnifiedBalanceCircle(
+  userId: string,
+  walletId: string,
+  amount: bigint,
+  sourceChain: SupportedChain,
+  destinationChain: SupportedChain,
+  recipientAddress?: Address
+): Promise<{
+  burnTxHash: Hash;
+  attestation: `0x${string}`;
+  mintTxHash: Hash;
+}> {
+
+  // 1. Get Wallet Address
+  const walletAddress = await getCircleWalletAddress(walletId);
+  const recipient = recipientAddress || walletAddress;
+
+  // 2. Get EOA signer address for this user and chain
+  const { address } = await getSignerWalletIdForUser(userId, sourceChain);
+  const eoaSignerAddress = address as Address;
+
+  console.log(`Using EOA signer ${eoaSignerAddress} for ${sourceChain}`);
+
+  // 3. Construct Burn Intent - ensure all domains are defined
+  const sourceDomain = DOMAIN_IDS[sourceChain];
+  const destinationDomain = DOMAIN_IDS[destinationChain];
+  
+  if (sourceDomain === undefined || destinationDomain === undefined) {
+    throw new Error(`Invalid chain configuration: source=${sourceChain}, destination=${destinationChain}`);
+  }
+
+  const burnIntentData: BurnIntentData = {
+    maxBlockHeight: maxUint256,
+    maxFee: BigInt(1_010_000),
+    spec: {
+      version: 1,
+      sourceDomain: sourceDomain,
+      destinationDomain: destinationDomain,
+      sourceContract: GATEWAY_WALLET_ADDRESS as Address,
+      destinationContract: GATEWAY_MINTER_ADDRESS as Address,
+      sourceToken: USDC_ADDRESSES[sourceChain] as Address,
+      destinationToken: USDC_ADDRESSES[destinationChain] as Address,
+      sourceDepositor: eoaSignerAddress, // EOA must be the depositor
+      destinationRecipient: recipient,
+      sourceSigner: eoaSignerAddress, // EOA signs
+      destinationCaller: zeroAddress,
+      value: amount,
+      salt: `0x${randomBytes(32).toString("hex")}` as `0x${string}`,
+      hookData: "0x" as `0x${string}`,
+    },
+  };
+
+  // 4. Sign Intent with user's EOA
+  const signature = await signBurnIntentWithEOA(burnIntentData, sourceChain, userId);
+
+  // 5. Submit to Gateway
+  // (We need to regenerate typedData here just to get the 'message' part for the submission payload)
+  const typedData = burnIntentTypedData(burnIntentData);
+
+  const { attestation, attestationSignature, transferId } = await submitBurnIntent(
+    typedData.message,
+    signature
+  );
+
+  console.log(`Transfer submitted. ID: ${transferId}. Polling for attestation...`);
+
+  // 5. Poll for Attestation
+  let finalAttestation = attestation;
+  let finalSignature = attestationSignature;
+
+  if (!finalAttestation || !finalSignature) {
+    while (true) {
+      await new Promise((r) => setTimeout(r, 3000)); // Wait 3s
+
+      const pollResponse = await fetch(`https://gateway-api-testnet.circle.com/v1/transfers/${transferId}`);
+      const pollJson = await pollResponse.json();
+      const status = pollJson.status || pollJson.state;
+
+      console.log(`Transfer Status: ${status}`);
+
+      if (pollJson.attestation && pollJson.signature) {
+        finalAttestation = pollJson.attestation;
+        finalSignature = pollJson.signature;
+        break;
+      } else if (status === "FAILED") {
+        throw new Error(`Transfer failed on Gateway: ${JSON.stringify(pollJson)}`);
+      }
+    }
+  }
+
+  // 6. Execute Mint on Destination (Custodial)
+  const mintTx = await executeMintCircle(
+    walletAddress,
+    destinationChain,
+    finalAttestation,
+    finalSignature
+  );
+
+  return {
+    burnTxHash: "0x" as Hash,
+    attestation: finalAttestation as `0x${string}`,
+    mintTxHash: mintTx.txHash as Hash,
+  };
+}
+
+export async function fetchGatewayBalance(address: Address): Promise<{
+  token: string;
+  balances: Array<{ domain: number; depositor: string; balance: string }>;
+}> {
+  const sources = [
+    { domain: DOMAIN_IDS.arcTestnet, depositor: address },
+    { domain: DOMAIN_IDS.avalancheFuji, depositor: address },
+    { domain: DOMAIN_IDS.baseSepolia, depositor: address },
+    { domain: DOMAIN_IDS.ethSepolia, depositor: address },
+  ];
+
+  const requestBody = {
+    token: "USDC",
+    sources,
+  };
+
+  const response = await fetch("https://gateway-api-testnet.circle.com/v1/balances", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(requestBody),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Gateway API error: ${response.status} - ${errorText}`);
+  }
+
+  const data = await response.json();
+  return data;
+}
+
+// Simple in-memory cache for balance checks
+const balanceCache = new Map<string, { balance: bigint; timestamp: number }>();
+const CACHE_TTL = 10000; // 10 seconds
+
+// Rate limiting for RPC calls
+let lastRpcCall = 0;
+const MIN_RPC_INTERVAL = 200; // Minimum 200ms between RPC calls
+
+async function rateLimitedDelay() {
+  const now = Date.now();
+  const timeSinceLastCall = now - lastRpcCall;
+  if (timeSinceLastCall < MIN_RPC_INTERVAL) {
+    await new Promise(resolve => setTimeout(resolve, MIN_RPC_INTERVAL - timeSinceLastCall));
+  }
+  lastRpcCall = Date.now();
+}
+
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  maxRetries = 3,
+  initialDelay = 1000
+): Promise<T> {
+  let lastError: Error | undefined;
+  
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      await rateLimitedDelay();
+      return await fn();
+    } catch (error: any) {
+      lastError = error;
+      
+      // Check if it's a rate limit error
+      const isRateLimitError = 
+        error?.message?.includes("429") || 
+        error?.status === 429 ||
+        error?.details?.includes("rate limit");
+      
+      if (isRateLimitError && attempt < maxRetries - 1) {
+        const delay = initialDelay * Math.pow(2, attempt);
+        console.log(`Rate limit hit, retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      } else if (attempt === maxRetries - 1) {
+        throw error;
+      }
+    }
+  }
+  
+  throw lastError || new Error("Max retries exceeded");
+}
+
+export async function getUsdcBalance(
+  address: Address,
+  chain: SupportedChain
+): Promise<bigint> {
+  // Check cache first
+  const cacheKey = `${address.toLowerCase()}-${chain}`;
+  const cached = balanceCache.get(cacheKey);
+  
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+    return cached.balance;
+  }
+
+  // Fetch with retry logic
+  const balance = await withRetry(async () => {
+    const publicClient = createPublicClient({
+      chain: getChainConfig(chain),
+      transport: http(),
+    });
+
+    const result = await publicClient.readContract({
+      address: USDC_ADDRESSES[chain] as Address,
+      abi: erc20Abi,
+      functionName: "balanceOf",
+      args: [address],
+    });
+
+    return result as bigint;
+  });
+
+  // Cache the result
+  balanceCache.set(cacheKey, { balance, timestamp: Date.now() });
+
+  return balance;
+}
+
+export async function fetchGatewayInfo(): Promise<{
+  version: number;
+  domains: Array<{
+    chain: string;
+    network: string;
+    domain: number;
+    walletContract: { address: string; supportedTokens: string[] };
+    minterContract: { address: string; supportedTokens: string[] };
+    processedHeight: string;
+    burnIntentExpirationHeight: string;
+  }>;
+}> {
+  const response = await fetch("https://gateway-api-testnet.circle.com/v1/info", {
+    method: "GET",
+    headers: {
+      "Content-Type": "application/json",
+    },
+  });
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Gateway API error: ${response.status} - ${error}`);
+  }
+
+  const data = await response.json();
+  return data;
+}
