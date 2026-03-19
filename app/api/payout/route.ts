@@ -20,6 +20,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { circleDeveloperSdk } from "@/lib/circle/developer-controlled-wallets-client";
 import { 
+  signAndSubmitGatewayBurnIntent,
+  executeGatewayMint,
   transferUnifiedBalanceCircle,
   CIRCLE_CHAIN_NAMES,
   type SupportedChain,
@@ -226,33 +228,6 @@ async function waitForTransactionConfirmation(challengeId: string) {
     console.log(`Transaction ${challengeId} state: ${tx?.state}. Polling again in 2s...`);
     await new Promise(resolve => setTimeout(resolve, 2000));
   }
-}
-
-async function executeMintCircle(
-  walletAddress: Address,
-  destinationChain: SupportedChain,
-  attestation: string,
-  signature: string
-) {
-  const blockchain = CIRCLE_CHAIN_NAMES[destinationChain];
-  if (!blockchain) throw new Error(`No Circle blockchain mapping for ${destinationChain}`);
-
-  const response = await circleDeveloperSdk.createContractExecutionTransaction({
-    walletAddress,
-    blockchain,
-    contractAddress: GATEWAY_MINTER_ADDRESS,
-    abiFunctionSignature: "gatewayMint(bytes,bytes)",
-    abiParameters: [attestation, signature],
-    fee: {
-      type: "level",
-      config: { feeLevel: "MEDIUM" },
-    },
-  });
-
-  const challengeId = response.data?.id;
-  if (!challengeId) throw new Error("Failed to initiate minting challenge");
-
-  return await waitForTransactionConfirmation(challengeId);
 }
 
 interface WalletBalance {
@@ -598,11 +573,9 @@ export async function POST(req: NextRequest) {
       // Use Gateway with EOA signing (no Circle wallet needed for burn, only for mint)
       console.log(`Initiating Gateway transfer from ${sourceWallet.chain} to ${destinationChain}`);
       
-      const { transferGatewayBalanceWithEOA } = await import("@/lib/circle/gateway-sdk");
-      
       // Step 1: Burn with EOA signature
       // Use the depositor wallet address (the one that has the Gateway balance)
-      const { transferId, attestation, attestationSignature } = await transferGatewayBalanceWithEOA(
+      const { transferId, attestation, attestationSignature } = await signAndSubmitGatewayBurnIntent(
         user.id,
         amountInAtomicUnits,
         sourceWallet.chain,
@@ -612,10 +585,7 @@ export async function POST(req: NextRequest) {
       );
       
       console.log(`Burn intent submitted. Transfer ID: ${transferId}`);
-      
-      // Step 2: Execute mint on destination using Circle wallet
-      const { executeMintCircle } = await import("@/lib/circle/gateway-sdk");
-      
+            
       // We need a Circle wallet address on the DESTINATION chain to execute the mint
       // Find or create a Circle wallet on the destination chain
       const destinationBlockchain = CHAIN_TO_BLOCKCHAIN[destinationChain];
@@ -715,9 +685,10 @@ export async function POST(req: NextRequest) {
       
       console.log(`Executing mint on ${destinationChain} using Circle wallet ${walletAddress} (${circleWallet.circle_wallet_id})...`);
       
+      // Step 2: Execute mint on destination using Circle wallet
       let mintTx;
       try {
-        mintTx = await executeMintCircle(
+        mintTx = await executeGatewayMint(
           walletAddress,
           destinationChain,
           attestation,

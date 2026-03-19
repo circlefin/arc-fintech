@@ -464,7 +464,7 @@ async function signBurnIntentWithEOA(
  * @param attestation - Gateway attestation
  * @param signature - Gateway attestation signature
  */
-export async function executeMintCircle(
+export async function executeGatewayMint(
   walletAddress: Address,
   destinationChain: SupportedChain,
   attestation: string,
@@ -500,7 +500,7 @@ export async function executeMintCircle(
  * Transfer Gateway balance using EOA wallet signing (no Circle wallet needed)
  * @param depositorAddress - The address that deposited to Gateway (has the balance)
  */
-export async function transferGatewayBalanceWithEOA(
+export async function signAndSubmitGatewayBurnIntent(
   userId: string,
   amount: bigint,
   sourceChain: SupportedChain,
@@ -697,7 +697,7 @@ export async function transferUnifiedBalanceCircle(
   }
 
   // 6. Execute Mint on Destination (Custodial)
-  const mintTx = await executeMintCircle(
+  const mintTx = await executeGatewayMint(
     walletAddress,
     destinationChain,
     finalAttestation,
