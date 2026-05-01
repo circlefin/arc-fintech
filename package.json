@@ -4,7 +4,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "test": "echo \"No tests configured yet\" && exit 0"
   },
   "dependencies": {
     "@circle-fin/adapter-circle-wallets": "^1.2.0",
@@ -57,7 +58,7 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@types/uuid": "^10.0.0",
-    "eslint": "^9",
+    "eslint": "8.57.1",
     "eslint-config-next": "16.0.8",
     "postcss": "^8",
     "tailwindcss": "^4.1.17",

@@ -24,8 +24,8 @@ Modern multi-chain treasury management system. This sample application uses Next
 1. Clone the repository and install dependencies:
 
    ```bash
-   git clone git@github.com:akelani-circle/fintech-starter.git
-   cd fintech-starter
+   git clone https://github.com/circlefin/arc-fintech.git
+   cd arc-fintech
    npm install
    ```
 
@@ -34,7 +34,6 @@ Modern multi-chain treasury management system. This sample application uses Next
    ```bash
    cp .env.example .env.local
    ```
-   Replace `your-ngrok-url` with your actual ngrok forwarding URL from step 4.
 
    Then edit `.env.local` and fill in all required values (see [Environment Variables](#environment-variables) section below).
 
