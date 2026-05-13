@@ -24,8 +24,8 @@ Modern multi-chain treasury management system. This sample application uses Next
 1. Clone the repository and install dependencies:
 
    ```bash
-   git clone git@github.com:akelani-circle/fintech-starter.git
-   cd fintech-starter
+   git clone git@github.com:circlefin/arc-fintech.git
+   cd arc-fintech
    npm install
    ```
 
