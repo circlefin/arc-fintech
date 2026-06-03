@@ -100,6 +100,36 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Verify source wallet belongs to the authenticated user
+    const { data: sourceWalletOwnership, error: sourceOwnershipError } = await supabase
+      .from("wallets")
+      .select("circle_wallet_id")
+      .eq("user_id", user.id)
+      .eq("circle_wallet_id", sourceWalletId)
+      .single();
+
+    if (sourceOwnershipError || !sourceWalletOwnership) {
+      return NextResponse.json(
+        { error: "Source wallet not found or access denied" },
+        { status: 404 }
+      );
+    }
+
+    // Verify destination wallet belongs to the authenticated user
+    const { data: destWalletOwnership, error: destOwnershipError } = await supabase
+      .from("wallets")
+      .select("circle_wallet_id")
+      .eq("user_id", user.id)
+      .eq("circle_wallet_id", destinationWalletId)
+      .single();
+
+    if (destOwnershipError || !destWalletOwnership) {
+      return NextResponse.json(
+        { error: "Destination wallet not found or access denied" },
+        { status: 404 }
+      );
+    }
+
     // Get source wallet address
     const sourceWalletResponse = await circleDeveloperSdk.getWallet({
       id: sourceWalletId,
