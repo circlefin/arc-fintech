@@ -33,6 +33,15 @@ const DB_CHAIN_TO_SDK: Record<string, SupportedChain> = {
 
 export async function POST(req: NextRequest) {
   try {
+    const supabase = await createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    if (!user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const { walletSetId, blockchain } = await req.json();
 
     if (!walletSetId || !blockchain) {
@@ -63,31 +72,24 @@ export async function POST(req: NextRequest) {
 
     // After creating the wallet, register the gateway signer
     try {
-      const supabase = await createClient();
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
+      const { data: eoaWallet } = await supabase
+        .from("wallets")
+        .select("address")
+        .eq("user_id", user.id)
+        .eq("blockchain", blockchain)
+        .eq("type", "gateway_signer")
+        .single();
 
-      if (user) {
-        const { data: eoaWallet } = await supabase
-          .from("wallets")
-          .select("address")
-          .eq("user_id", user.id)
-          .eq("blockchain", blockchain)
-          .eq("type", "gateway_signer")
-          .single();
-
-        if (eoaWallet) {
-          console.log(
-            `Will add EOA delegate ${eoaWallet.address} for depositor ${response.data.wallets[0].address}`
-          );
-          await initiateDepositFromCustodialWallet(
-            response.data.wallets[0].id as string,
-            DB_CHAIN_TO_SDK[blockchain],
-            BigInt(0),
-            eoaWallet.address as any
-          );
-        }
+      if (eoaWallet) {
+        console.log(
+          `Will add EOA delegate ${eoaWallet.address} for depositor ${response.data.wallets[0].address}`
+        );
+        await initiateDepositFromCustodialWallet(
+          response.data.wallets[0].id as string,
+          DB_CHAIN_TO_SDK[blockchain],
+          BigInt(0),
+          eoaWallet.address as any
+        );
       }
     } catch (error) {
       console.error("Failed to register delegate for gateway:", error);
