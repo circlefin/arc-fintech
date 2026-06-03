@@ -81,15 +81,14 @@ export async function POST(req: NextRequest) {
   } catch (error) {
     console.error('Compliance screening error:', error);
 
-    // Return a graceful error response
     return NextResponse.json(
       {
         success: false,
-        result: 'PASS',
-        message: 'Compliance screening temporarily unavailable. Proceeding with caution.',
+        result: 'FAIL',
+        message: 'Compliance screening unavailable. Transaction blocked.',
         error: error instanceof Error ? error.message : 'Unknown error',
       },
-      { status: 500 }
+      { status: 503 }
     );
   }
 }
