@@ -106,6 +106,7 @@ CIRCLE_ENTITY_SECRET=your-circle-entity-secret
 | `SUPABASE_SERVICE_ROLE_KEY` | Server-side | Supabase service role key for admin operations. |
 | `CIRCLE_API_KEY` | Server-side | Circle API key for wallet operations. |
 | `CIRCLE_ENTITY_SECRET` | Server-side | Circle entity secret for signing transactions. |
+| `ARC_TESTNET_RPC_KEY` | Server-side | Arc Testnet RPC key. Get from https://rpc.testnet.arc.network |
 
 ## User Accounts
 
