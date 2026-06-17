@@ -775,17 +775,24 @@ async function withRetry<T>(
     } catch (error: any) {
       lastError = error;
       
-      // Check if it's a rate limit error
-      const isRateLimitError = 
-        error?.message?.includes("429") || 
+      // Check if it's a retryable error (rate limit or transient network error)
+      const isRateLimitError =
+        error?.message?.includes("429") ||
         error?.status === 429 ||
         error?.details?.includes("rate limit");
-      
-      if (isRateLimitError && attempt < maxRetries - 1) {
+      const isNetworkError =
+        error?.message?.includes("ECONNRESET") ||
+        error?.message?.includes("ETIMEDOUT") ||
+        error?.message?.includes("ECONNREFUSED") ||
+        error?.message?.includes("fetch failed") ||
+        error?.code === "ECONNRESET" ||
+        error?.code === "ETIMEDOUT";
+      const isRetryable = isRateLimitError || isNetworkError;
+      if (isRetryable && attempt < maxRetries - 1) {
         const delay = initialDelay * Math.pow(2, attempt);
-        console.log(`Rate limit hit, retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`);
+        const reason = isRateLimitError ? "Rate limit" : "Network error";
+        console.log(`${reason}, retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries}): ${error?.message}`);
         await new Promise(resolve => setTimeout(resolve, delay));
-      } else if (attempt === maxRetries - 1) {
         throw error;
       }
     }
