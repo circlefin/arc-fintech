@@ -20,9 +20,18 @@ import crypto from "crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+if (!supabaseUrl || !supabaseServiceRoleKey) {
+  throw new Error(
+    "[arc-fintech] Missing required environment variables: NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY"
+  );
+}
+
 const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY,
+  supabaseUrl,
+  supabaseServiceRoleKey,
   {
     auth: {
       autoRefreshToken: false,
@@ -97,8 +106,11 @@ export async function POST(req: NextRequest) {
 
       if (notification.state === "FAILED") {
         console.error(`Transaction ${notification.id} FAILED on chain. Reason: ${(notification as any).errorReason}`);
-        // Optional: Delete transaction or mark differently if possible. 
-        // For now, we skip update to avoid DB error.
+        // Log failed transaction timestamp for audit purposes
+        await supabaseAdmin.from("transactions").update({
+          updated_at: new Date().toISOString(),
+          circle_transaction_id: notification.id,
+        }).eq("circle_transaction_id", notification.id);
       } else if (newStatus) {
         const txHash = (notification as any).txHash;
 
@@ -175,6 +187,13 @@ export async function POST(req: NextRequest) {
             await wait(RETRY_DELAY_MS);
           }
         }
+        if (!updated) {
+          console.error(
+            `[arc-fintech] Webhook: Failed to match transaction after ${MAX_ATTEMPTS} attempts. ` +
+            `notification.id=${notification.id}, state=${notification.state}`
+          );
+        }
+        
 
       }
     }
