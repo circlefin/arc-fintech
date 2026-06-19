@@ -19,6 +19,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { circleDeveloperSdk } from "@/lib/circle/developer-controlled-wallets-client";
+import { screenAddress, mapComplianceResult } from "@/lib/compliance/utils";
 import { 
   signAndSubmitGatewayBurnIntent,
   executeGatewayMint,
@@ -270,6 +271,17 @@ export async function POST(req: NextRequest) {
 
     const amountInAtomicUnits = BigInt(convertToSmallestUnit(amount));
     const destinationChain: SupportedChain = requestedChain || "arcTestnet";
+
+    // Server-side compliance enforcement — must pass before any funds move
+    const complianceChain = CHAIN_TO_BLOCKCHAIN[destinationChain];
+    const circleComplianceResponse = await screenAddress(recipientAddress, complianceChain);
+    const complianceResult = mapComplianceResult(circleComplianceResponse);
+    if (complianceResult !== "PASS") {
+      return NextResponse.json(
+        { error: "Transaction blocked by compliance screening", result: complianceResult },
+        { status: 403 }
+      );
+    }
 
     // Fetch user's wallets
     const { data: wallets, error: walletsError } = await supabase
