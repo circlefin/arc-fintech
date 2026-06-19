@@ -22,6 +22,26 @@ import { circleDeveloperSdk } from "@/lib/circle/developer-controlled-wallets-cl
 export async function POST(req: NextRequest) {
   try {
     const { entityName } = await req.json();
+    const apiKey = process.env.CIRCLE_API_KEY?.trim();
+    const entitySecret = process.env.CIRCLE_ENTITY_SECRET?.trim();
+
+    if (!apiKey || !entitySecret) {
+      return NextResponse.json(
+        { error: "Circle API credentials are not configured" },
+        { status: 500 }
+      );
+    }
+
+    // Circle entity secret is generated as a 64-char hex string.
+    if (!/^[a-fA-F0-9]{64}$/.test(entitySecret)) {
+      return NextResponse.json(
+        {
+          error:
+            "CIRCLE_ENTITY_SECRET format is invalid. Expected a 64-character hex string from Circle generateEntitySecret().",
+        },
+        { status: 500 }
+      );
+    }
 
     if (!entityName.trim()) {
       return NextResponse.json(
@@ -43,12 +63,17 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ ...response.data.walletSet }, { status: 201 });
   } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+
     if (error instanceof Error) {
       console.error(`Wallet set creation failed: ${error.message}`);
     }
 
     return NextResponse.json(
-      { error: "Failed to create wallet set" },
+      {
+        error: "Failed to create wallet set",
+        details: message,
+      },
       { status: 500 }
     );
   }

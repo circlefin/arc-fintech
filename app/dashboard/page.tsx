@@ -287,11 +287,12 @@ export default function Page() {
   // Balance fetching is handled by the shared context
   useEffect(() => {
     let channel: RealtimeChannel | null = null
+    let isCancelled = false
 
     const setupData = async () => {
       try {
         const { data: { user } } = await supabase.auth.getUser()
-        if (!user) return
+        if (isCancelled || !user) return
 
         // Fetch wallets with full details (for activity feed)
         const { data: walletsData, error: walletsError } = await supabase
@@ -301,6 +302,7 @@ export default function Page() {
           .order("created_at", { ascending: false })
 
         if (walletsError) throw walletsError
+        if (isCancelled) return
 
         const { data: transactionsData, error: transactionsError } = await supabase
           .from("transactions")
@@ -309,6 +311,7 @@ export default function Page() {
           .order("created_at", { ascending: false })
 
         if (transactionsError) throw transactionsError
+        if (isCancelled) return
 
         setLocalWallets(walletsData || [])
         setTransactions(transactionsData || [])
@@ -316,10 +319,12 @@ export default function Page() {
           setLastUpdated(new Date())
         }
         setLoading(false)
+        if (isCancelled) return
 
         // Subscribe to wallet changes (for activity feed updates)
         channel = supabase
-          .channel("dashboard-activity-realtime")
+          // Use a per-setup topic to avoid stale setup races in Strict Mode.
+          .channel(`dashboard-activity-realtime-${user.id}-${Date.now()}`)
           .on(
             "postgres_changes",
             {
@@ -383,6 +388,7 @@ export default function Page() {
     setupData()
 
     return () => {
+      isCancelled = true
       if (channel) {
         supabase.removeChannel(channel)
       }
