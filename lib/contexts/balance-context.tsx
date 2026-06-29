@@ -374,29 +374,22 @@ export function BalanceProvider({ children }: { children: ReactNode }) {
             }
           },
           onTransactionChange: ({ eventType, newRow, oldId }) => {
-            if (eventType === "INSERT" && newRow) {
-              setTransactions((prev) =>
-                prev.some((tx) => tx.id === newRow.id) ? prev : [newRow, ...prev]
-              )
-              setLastUpdated(new Date())
-            } else if (eventType === "UPDATE" && newRow) {
-              setTransactions((prev) =>
-                prev.map((tx) => (tx.id === newRow.id ? newRow : tx))
-              )
-              setLastUpdated(new Date())
-
-              // Only refresh balances on terminal state to avoid hammering
-              // Circle's API. ProcessedSet dedupes the bursty UPDATE pairs
-              // that fire during Bridge Kit settlement.
-              if (newRow.status !== "COMPLETE") return
-              if (processedTxRef.current.has(newRow.id)) return
-              processedTxRef.current.add(newRow.id)
+            // Refresh balances once a transaction reaches its terminal COMPLETE
+            // state and touches one of our wallets. Handles both UPDATE→COMPLETE
+            // (dashboard-initiated flows that settle later) and INSERT of an
+            // already-COMPLETE row (e.g. a Gateway deposit made outside the app
+            // that the webhook records straight as COMPLETE). ProcessedSet
+            // dedupes the bursty pairs Bridge Kit fires during settlement.
+            const maybeRefreshForCompletedTx = (row: FullTransaction) => {
+              if (row.status !== "COMPLETE") return
+              if (processedTxRef.current.has(row.id)) return
+              processedTxRef.current.add(row.id)
 
               // Defensive lower-casing: any of these address fields can be
               // null in the schema, and Realtime payloads occasionally arrive
               // without the full row.
-              const sender = newRow.sender_address?.toLowerCase() ?? ""
-              const recipient = newRow.recipient_address?.toLowerCase() ?? ""
+              const sender = row.sender_address?.toLowerCase() ?? ""
+              const recipient = row.recipient_address?.toLowerCase() ?? ""
               const isRelevant = walletsRef.current.some((w) => {
                 const addr = w.address?.toLowerCase() ?? ""
                 if (!addr) return false
@@ -406,6 +399,20 @@ export function BalanceProvider({ children }: { children: ReactNode }) {
                 debouncedWalletRefresh()
                 debouncedGatewayRefresh()
               }
+            }
+
+            if (eventType === "INSERT" && newRow) {
+              setTransactions((prev) =>
+                prev.some((tx) => tx.id === newRow.id) ? prev : [newRow, ...prev]
+              )
+              setLastUpdated(new Date())
+              maybeRefreshForCompletedTx(newRow)
+            } else if (eventType === "UPDATE" && newRow) {
+              setTransactions((prev) =>
+                prev.map((tx) => (tx.id === newRow.id ? newRow : tx))
+              )
+              setLastUpdated(new Date())
+              maybeRefreshForCompletedTx(newRow)
             } else if (eventType === "DELETE" && oldId) {
               setTransactions((prev) => prev.filter((tx) => tx.id !== oldId))
               setLastUpdated(new Date())

@@ -7,7 +7,8 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "spend:gateway:arc": "node scripts/spend-arc-gateway-usdc.mjs"
+    "spend:gateway:arc": "node scripts/spend-arc-gateway-usdc.mjs",
+    "webhooks:register": "node scripts/register-gateway-webhooks.mjs"
   },
   "dependencies": {
     "@circle-fin/adapter-circle-wallets": "^1.2.7",

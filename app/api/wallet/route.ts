@@ -20,6 +20,7 @@ import { NextResponse } from "next/server";
 import { Blockchain } from "@circle-fin/developer-controlled-wallets";
 import { circleDeveloperSdk } from "@/lib/circle/developer-controlled-wallets-client";
 import { initiateDepositFromCustodialWallet } from "@/lib/circle/gateway-sdk";
+import { syncGatewayWebhookSubscription } from "@/lib/circle/gateway-webhooks";
 import { createClient } from "@/lib/supabase/server";
 import { SDK_CHAIN_BY_BLOCKCHAIN as DB_CHAIN_TO_SDK } from "@/lib/constants/chains";
 import { withAuth } from "@/lib/api/with-auth";
@@ -147,6 +148,23 @@ export const POST = withAuth(async (req, { user, supabase }) => {
     } catch (error) {
       console.error("Failed to register delegate for gateway:", error);
       // Do not block wallet creation if delegation fails; just log.
+    }
+
+    // Best-effort: register the new address on the Gateway permissionless
+    // webhook subscription so deposit completions fire `gateway.deposit.finalized`
+    // for it. Never block wallet creation on this — it's a no-op in
+    // environments without a configured public webhook endpoint.
+    if (newWallet.address) {
+      try {
+        const result = await syncGatewayWebhookSubscription([newWallet.address]);
+        if (result.status === "skipped") {
+          console.warn(
+            `Gateway webhook registration skipped: ${result.reason}`
+          );
+        }
+      } catch (error) {
+        console.error("Failed to register Gateway webhook for new wallet:", error);
+      }
     }
 
     return NextResponse.json({ ...newWallet }, { status: 201 });
