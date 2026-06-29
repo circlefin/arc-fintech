@@ -37,15 +37,14 @@ import {
 } from "@/components/ui/select";
 import { ComplianceStatusBadge } from "@/components/compliance-status-badge";
 import { ComplianceDetailsDialog } from "@/components/compliance-details-dialog";
-import { ComplianceCheckResponse } from "@/types/compliance";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { AlertTriangle, Info, CheckCircle2 } from "lucide-react";
 import { toast } from "sonner";
-import { isValidAddress } from "@/lib/compliance/utils";
 import { createClient } from "@/lib/supabase/client";
 import { Separator } from "@/components/ui/separator";
 import { WalletSelect, WalletOption } from "@/components/wallet-select";
 import { useBalanceContext } from "@/lib/contexts/balance-context";
+import { useComplianceCheck } from "@/components/dialogs/use-compliance-check";
 
 const SUPPORTED_CHAINS = [
   { value: "arcTestnet", label: "Arc Testnet" },
@@ -85,148 +84,59 @@ export function SendButton() {
   const [selectedWallet, setSelectedWallet] = useState<WalletOption | null>(null);
   const [walletSelectValue, setWalletSelectValue] = useState("");
   
-  const [complianceData, setComplianceData] = useState<ComplianceCheckResponse | null>(null);
-  const [isCheckingCompliance, setIsCheckingCompliance] = useState(false);
   const [showComplianceDetails, setShowComplianceDetails] = useState(false);
   const [showReviewWarning, setShowReviewWarning] = useState(false);
-  const [addressError, setAddressError] = useState<string>("");
   const [isInternalWallet, setIsInternalWallet] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [settlementInfo, setSettlementInfo] = useState<SettlementInfo | null>(null);
   const [routingInfo, setRoutingInfo] = useState<RoutingInfo | null>(null);
-  const [isValidatingAddress, setIsValidatingAddress] = useState(false);
-  const [canReceiveUSDC, setCanReceiveUSDC] = useState<boolean | null>(null);
 
   const supabase = createClient();
   const { gatewayTotal, refreshGatewayBalance, refreshWalletBalance } = useBalanceContext();
 
-  // Debounced compliance check, internal wallet check, and address validation
+  const {
+    complianceData,
+    isCheckingCompliance,
+    isValidatingAddress,
+    addressError,
+    canReceiveUSDC,
+    isBlocked,
+    needsReview,
+    setAddressError,
+    reset: resetCompliance,
+  } = useComplianceCheck({
+    address,
+    chain: BLOCKCHAIN_MAP[destinationChain] || "ARC-TESTNET",
+    validateChainCompatibility: true,
+  });
+
+  // Internal wallet check is unique to send (we want to redirect users to
+  // Transfer if the destination is one of their own wallets).
   useEffect(() => {
-    // Reset validation state on change
-    setAddressError("");
-    setComplianceData(null);
     setIsInternalWallet(false);
-    setCanReceiveUSDC(null);
+    if (!address || address.length < 10) return;
 
-    if (!address) return;
-
-    // Show validation error for any non-empty input that's invalid
-    if (address.length > 0 && !isValidAddress(address)) {
-      setComplianceData(null);
-      setAddressError("Invalid blockchain address format");
-      return;
-    }
-
-    // Only run checks if address is long enough and valid
-    if (address.length < 10) {
-      setComplianceData(null);
-      return;
-    }
-
+    let cancelled = false;
     const timer = setTimeout(async () => {
-      await checkIfInternalWallet();
-      await validateAddress();
-      await checkCompliance();
-    }, 500);
-
-    return () => clearTimeout(timer);
-  }, [address]);
-
-  const checkIfInternalWallet = async () => {
-    try {
-      // Check if address exists in our wallets table
-      const { data, error } = await supabase
-        .from("wallets")
-        .select("id")
-        .eq("address", address)
-        .maybeSingle();
-
-      if (error) {
-        console.error("Error checking wallet:", error);
-        return;
-      }
-
-      if (data) {
+      try {
+        const { data, error } = await supabase
+          .from("wallets")
+          .select("id")
+          .eq("address", address)
+          .maybeSingle();
+        if (cancelled || error || !data) return;
         setIsInternalWallet(true);
         setAddressError("Cannot send to internal wallets. Use Transfer instead.");
+      } catch (error) {
+        if (!cancelled) console.error("Check failed:", error);
       }
-    } catch (error) {
-      console.error("Check failed:", error);
-    }
-  };
+    }, 500);
 
-  const validateAddress = async () => {
-    if (!address || address.length < 10) return;
-
-    if (!isValidAddress(address)) {
-      return;
-    }
-
-    const blockchain = BLOCKCHAIN_MAP[destinationChain] || "ARC-TESTNET";
-
-    setIsValidatingAddress(true);
-    try {
-      const response = await fetch("/api/wallet/validate-address", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          address: address,
-          blockchain: blockchain,
-        }),
-      });
-
-      const data = await response.json();
-      setCanReceiveUSDC(data.isValid);
-
-      if (!data.isValid) {
-        setAddressError("This address cannot receive USDC on the selected chain");
-      }
-    } catch (error) {
-      console.error("Address validation failed:", error);
-      // Don't block on validation errors, just log them
-      setCanReceiveUSDC(null);
-    } finally {
-      setIsValidatingAddress(false);
-    }
-  };
-
-  const checkCompliance = async () => {
-    if (!address || address.length < 10) return;
-
-    // Validate address format
-    if (!isValidAddress(address)) {
-      toast.error("Invalid Address", {
-        description: "Please enter a valid blockchain address.",
-      });
-      return;
-    }
-
-    const blockchain = BLOCKCHAIN_MAP[destinationChain] || "ETH-SEPOLIA";
-
-    setIsCheckingCompliance(true);
-    try {
-      const response = await fetch("/api/compliance/screen", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          address: address,
-          chain: blockchain,
-        }),
-      });
-
-      const data: ComplianceCheckResponse = await response.json();
-      setComplianceData(data);
-
-      // Don't show toast notifications - let the user see the badge and details
-    } catch (error) {
-      console.error("Compliance check failed:", error);
-      toast.error("Compliance check failed", {
-        description: "Unable to verify address. Please try again.",
-      });
-    } finally {
-      setIsCheckingCompliance(false);
-    }
-  };
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [address, supabase, setAddressError]);
 
   const handleSend = async () => {
     if (isInternalWallet) {
@@ -239,6 +149,13 @@ export function SendButton() {
     if (complianceData?.result === "FAIL") {
       toast.error("Transfer Blocked", {
         description: "This address is blocked and cannot receive transfers.",
+      });
+      return;
+    }
+
+    if (complianceData?.result === "ERROR") {
+      toast.error("Screening Unavailable", {
+        description: "Cannot send until compliance screening succeeds. Please retry the check.",
       });
       return;
     }
@@ -334,19 +251,11 @@ export function SendButton() {
   const resetForm = () => {
     setAddress("");
     setAmount("1");
-    setComplianceData(null);
     setShowReviewWarning(false);
-    setAddressError("");
     setIsInternalWallet(false);
     setShowComplianceDetails(false);
-    setCanReceiveUSDC(null);
-    // Don't reset selectedWalletId to keep user preference if they open again?
-    // But original code reset inputs on open=false.
-    // Let's reset selection too if needed, but original resetForm didn't reset source type or wallet.
+    resetCompliance();
   };
-
-  const isBlocked = complianceData?.result === "FAIL";
-  const needsReview = complianceData?.result === "REVIEW";
 
   return (
     <>
@@ -484,7 +393,7 @@ export function SendButton() {
                 )}
                 {sourceType === "gateway" && (
                   <p className="text-xs text-muted-foreground">
-                    Use unified Gateway balance across all chains
+                    Use unified Gateway balance with Forwarding Service execution
                   </p>
                 )}
               </div>

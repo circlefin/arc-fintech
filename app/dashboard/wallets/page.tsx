@@ -45,8 +45,8 @@ import {
 } from "@/components/ui/table"
 import { Badge } from "@/components/ui/badge"
 import { Skeleton } from "@/components/ui/skeleton"
-import { createClient } from "@/lib/supabase/client"
-import { BLOCK_EXPLORERS } from "@/lib/constants/block-explorers"
+import { shortenAddress, getExplorerUrl } from "@/lib/utils/data-formatters"
+import { useBalanceContext } from "@/lib/contexts/balance-context"
 
 type Wallet = {
   id: string
@@ -65,25 +65,15 @@ type SortConfig = {
 
 const ITEMS_PER_PAGE = 10
 
-// --- Helpers ---
-
-function shortenAddress(address: string) {
-  if (!address) return ""
-  if (address.length < 10) return address
-  return `${address.slice(0, 6)}...${address.slice(-4)}`
-}
-
-function getExplorerUrl(blockchain: string, address: string) {
-  const baseUrl = BLOCK_EXPLORERS[blockchain]
-  if (!baseUrl) return "#"
-  return `${baseUrl}/address/${address}`
-}
-
 export default function Page() {
   const router = useRouter()
-  const [wallets, setWallets] = React.useState<Wallet[]>([])
-  const [balances, setBalances] = React.useState<Record<string, string>>({})
-  const [loading, setLoading] = React.useState(true)
+  const { fullWallets, walletBalances, isLoadingData } = useBalanceContext()
+
+  // The shared context owns wallets + their realtime channel + the balance
+  // map. We just adapt the row shape here.
+  const wallets = fullWallets as unknown as Wallet[]
+  const balances = walletBalances
+  const loading = isLoadingData
 
   // Filter, Pagination & Sorting State
   const [filter, setFilter] = React.useState("")
@@ -92,58 +82,6 @@ export default function Page() {
     key: null,
     direction: null,
   })
-
-  const supabase = createClient()
-
-  const fetchBalances = async (currentWallets: Wallet[]) => {
-    if (currentWallets.length === 0) return
-
-    const walletIds = currentWallets.map((w) => w.circle_wallet_id)
-
-    try {
-      const res = await fetch("/api/wallet/balance", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ walletIds }),
-      })
-
-      if (res.ok) {
-        const data = await res.json()
-        setBalances((prev) => ({ ...prev, ...data }))
-      }
-    } catch (error) {
-      console.error("Error fetching balances:", error)
-    }
-  }
-
-  React.useEffect(() => {
-    const fetchData = async () => {
-      try {
-        const { data: { user } } = await supabase.auth.getUser()
-        if (!user) return
-
-        const { data, error } = await supabase
-          .from("wallets")
-          .select("*")
-          .eq("user_id", user.id)
-          .order("created_at", { ascending: false })
-
-        if (error) throw error
-
-        const initialWallets = data || []
-        setWallets(initialWallets)
-        setLoading(false)
-
-        // Fetch balances after wallets are loaded
-        fetchBalances(initialWallets)
-      } catch (error) {
-        console.error("Error loading wallets:", error)
-        setLoading(false)
-      }
-    }
-
-    fetchData()
-  }, [supabase])
 
   // --- Sorting Logic ---
 

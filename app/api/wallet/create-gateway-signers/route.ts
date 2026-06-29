@@ -16,26 +16,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { NextResponse } from "next/server";
 import { storeGatewayEOAWalletsForUser } from "@/lib/circle/create-gateway-eoa-wallets";
+import { withAuth } from "@/lib/api/with-auth";
 
 /**
  * POST /api/wallet/create-gateway-signers
  * Creates Gateway EOA signer wallets for the authenticated user
  * This should be called during user onboarding (after successful signup)
  */
-export async function POST(req: NextRequest) {
+export const POST = withAuth(async (_req, { user, supabase }) => {
   try {
-    const supabase = await createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-
-    if (!user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
     // Check if user already has Gateway signer wallets
     const { data: existingWallets, error: checkError } = await supabase
       .from("wallets")
@@ -83,4 +74,4 @@ export async function POST(req: NextRequest) {
       { status: 500 }
     );
   }
-}
+});

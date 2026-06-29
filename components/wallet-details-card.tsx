@@ -42,7 +42,7 @@ import {
 } from "@tabler/icons-react"
 import { toast } from "sonner"
 import { useRouter } from "next/navigation"
-import { BLOCK_EXPLORERS } from "@/lib/constants/block-explorers"
+import { getExplorerUrl } from "@/lib/utils/data-formatters"
 import { formatWalletDetails, shortenAddress, formatDate, formatAmount } from "@/lib/utils/data-formatters"
 
 // Type definitions
@@ -77,12 +77,6 @@ export function WalletDetailsCard({ wallet }: { wallet: WalletDetails }) {
       "ARC-TESTNET": "bg-yellow-100 text-yellow-800",
     }
     return colors[blockchain] || "bg-gray-100 text-gray-800"
-  }
-
-  const getExplorerUrl = (blockchain: string, address: string): string => {
-    const baseUrl = BLOCK_EXPLORERS[blockchain]
-    if (!baseUrl || !address) return "#"
-    return `${baseUrl}/address/${address}`
   }
 
   return (

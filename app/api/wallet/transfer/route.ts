@@ -16,37 +16,29 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
-import { circleDeveloperSdk } from "@/lib/circle/developer-controlled-wallets-client";
-import { CHAIN_TO_USDC_ADDRESS } from "@/lib/constants/usdc-addresses";
+import { NextResponse } from "next/server";
+import { z } from "zod";
+import { validateJsonBody, evmAddressSchema } from "@/lib/api/validate";
+import { withAuth } from "@/lib/api/with-auth";
+import {
+  getAppKitSendError,
+  sendUsdcOnSameChainWithAppKit,
+} from "@/lib/circle/app-kit-send";
 
-// Helper to convert USDC amount to atomic units (6 decimals)
-function convertToSmallestUnit(amount: string): string {
-  const val = parseFloat(amount);
-  if (isNaN(val)) return "0";
-  return BigInt(Math.floor(val * 1_000_000)).toString();
-}
+const bodySchema = z.object({
+  sourceWalletId: z.string().min(1),
+  destinationAddress: evmAddressSchema,
+  amount: z
+    .union([z.string(), z.number()])
+    .transform((v) => (typeof v === "string" ? Number(v) : v))
+    .refine((n) => Number.isFinite(n) && n > 0, "Amount must be positive"),
+});
 
-export async function POST(req: NextRequest) {
+export const POST = withAuth(async (req, { user, supabase }) => {
   try {
-    const supabase = await createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-
-    if (!user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
-    const { sourceWalletId, destinationAddress, amount } = await req.json();
-
-    if (!sourceWalletId || !destinationAddress || !amount) {
-      return NextResponse.json(
-        { error: "Missing required fields" },
-        { status: 400 }
-      );
-    }
+    const parsed = await validateJsonBody(req, bodySchema);
+    if (!parsed.ok) return parsed.response;
+    const { sourceWalletId, destinationAddress, amount } = parsed.data;
 
     // 1. Fetch Source Wallet to get its blockchain
     const { data: sourceWallet, error: sourceError } = await supabase
@@ -63,39 +55,14 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const amountNum = parseFloat(amount);
+    const amountNum = amount;
 
-    // 2. Get the USDC contract address for the source wallet's chain
-    const usdcContractAddress = CHAIN_TO_USDC_ADDRESS[sourceWallet.blockchain];
-
-    if (!usdcContractAddress) {
-      return NextResponse.json(
-        { error: `USDC contract not found for chain: ${sourceWallet.blockchain}` },
-        { status: 400 }
-      );
-    }
-
-    const response = await circleDeveloperSdk.createContractExecutionTransaction({
-      walletId: sourceWalletId,
-      contractAddress: usdcContractAddress,
-      abiFunctionSignature: "transfer(address,uint256)",
-      abiParameters: [
-        destinationAddress,
-        convertToSmallestUnit(amount),
-      ],
-      fee: {
-        type: "level",
-        config: {
-          feeLevel: "HIGH",
-        },
-      },
+    const sendResult = await sendUsdcOnSameChainWithAppKit({
+      sourceBlockchain: sourceWallet.blockchain,
+      sourceWalletAddress: sourceWallet.address,
+      recipientAddress: destinationAddress,
+      amount: amount.toString(),
     });
-
-    const transactionData = response.data;
-
-    if (!transactionData?.id) {
-      throw new Error("Failed to initiate transfer with Circle API.");
-    }
 
     // 4. Log to Transactions Table
     const { error: insertError } = await supabase.from("transactions").insert([
@@ -104,7 +71,8 @@ export async function POST(req: NextRequest) {
         amount: amountNum,
         sender_address: sourceWallet.address,
         recipient_address: destinationAddress,
-        circle_transaction_id: transactionData.id,
+        tx_hash: sendResult.txHash ?? null,
+        circle_transaction_id: sendResult.txId,
         blockchain: sourceWallet.blockchain,
         type: "OUTBOUND",
         status: "PENDING",
@@ -117,29 +85,20 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      txId: transactionData.id,
+      txId: sendResult.txId,
+      txHash: sendResult.txHash ?? null,
     });
 
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Transfer error:", error);
-    
-    // Log detailed error information
-    if (error?.response?.data) {
-      console.error("Circle API error details:", JSON.stringify(error.response.data, null, 2));
-    }
-
-    let errorMessage = "Internal server error";
-    if (error?.response?.data?.message) {
-      errorMessage = error.response.data.message;
-    } else if (error?.response?.data?.error) {
-      errorMessage = error.response.data.error;
-    } else if (error instanceof Error) {
-      errorMessage = error.message;
-    }
+    const mappedError = getAppKitSendError(error);
 
     return NextResponse.json(
-      { error: errorMessage },
-      { status: 500 }
+      {
+        error: mappedError.error,
+        userMessage: mappedError.userMessage,
+      },
+      { status: mappedError.status }
     );
   }
-}
+});

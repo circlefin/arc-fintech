@@ -40,7 +40,7 @@ import {
   IconRefresh,
 } from "@tabler/icons-react"
 import { toast } from "sonner"
-import { BLOCK_EXPLORERS } from "@/lib/constants/block-explorers"
+import { getExplorerUrl } from "@/lib/utils/data-formatters"
 import { TransactionDetails, shortenAddress, formatDate, formatAmount } from "@/lib/utils/data-formatters"
 
 export function TransactionDetailsCard({ transaction }: { transaction: TransactionDetails }) {
@@ -69,12 +69,6 @@ export function TransactionDetailsCard({ transaction }: { transaction: Transacti
     ) : (
       <IconArrowUp className="h-4 w-4 text-blue-600 dark:text-blue-400" />
     )
-  }
-
-  const getExplorerUrl = (blockchain: string, address: string): string => {
-    const baseUrl = BLOCK_EXPLORERS[blockchain]
-    if (!baseUrl || !address) return "#"
-    return `${baseUrl}/address/${address}`
   }
 
   return (

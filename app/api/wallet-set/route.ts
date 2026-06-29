@@ -16,14 +16,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { circleDeveloperSdk } from "@/lib/circle/developer-controlled-wallets-client";
+import { withAuth } from "@/lib/api/with-auth";
 
-export async function POST(req: NextRequest) {
+export const POST = withAuth(async (req) => {
   try {
     const { entityName } = await req.json();
 
-    if (!entityName.trim()) {
+    if (!entityName || !entityName.trim()) {
       return NextResponse.json(
         { error: "entityName is required" },
         { status: 400 }
@@ -52,4 +53,4 @@ export async function POST(req: NextRequest) {
       { status: 500 }
     );
   }
-}
+});

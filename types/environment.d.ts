@@ -26,5 +26,8 @@ namespace NodeJS {
     // Circle
     CIRCLE_API_KEY: string
     CIRCLE_ENTITY_SECRET: string
+
+    // Arc Testnet RPC (optional but recommended; falls back to public endpoint).
+    ARC_TESTNET_RPC_KEY?: string
   }
 }

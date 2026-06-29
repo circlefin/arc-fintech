@@ -18,7 +18,7 @@
 
 import { ComplianceResult } from "@/types/compliance";
 import { Badge } from "@/components/ui/badge";
-import { CheckCircle2, AlertTriangle, XCircle } from "lucide-react";
+import { CheckCircle2, AlertTriangle, XCircle, Ban } from "lucide-react";
 
 interface ComplianceStatusBadgeProps {
   result: ComplianceResult;
@@ -43,6 +43,12 @@ export function ComplianceStatusBadge({ result, className }: ComplianceStatusBad
       label: "Blocked",
       variant: "default" as const,
       icon: XCircle,
+      className: "bg-red-500/10 text-red-700 hover:bg-red-500/20 dark:text-red-400",
+    },
+    ERROR: {
+      label: "Screening Unavailable",
+      variant: "default" as const,
+      icon: Ban,
       className: "bg-red-500/10 text-red-700 hover:bg-red-500/20 dark:text-red-400",
     },
   };

@@ -4,12 +4,16 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "spend:gateway:arc": "node scripts/spend-arc-gateway-usdc.mjs",
+    "webhooks:register": "node scripts/register-gateway-webhooks.mjs"
   },
   "dependencies": {
-    "@circle-fin/adapter-circle-wallets": "^1.2.0",
-    "@circle-fin/bridge-kit": "^1.6.0",
-    "@circle-fin/developer-controlled-wallets": "^10.0.0",
+    "@circle-fin/adapter-circle-wallets": "^1.2.7",
+    "@circle-fin/app-kit": "^1.4.1",
+    "@circle-fin/developer-controlled-wallets": "^10.3.1",
     "@dnd-kit/core": "^6.3.1",
     "@dnd-kit/modifiers": "^9.0.0",
     "@dnd-kit/sortable": "^10.0.0",
@@ -31,12 +35,13 @@
     "@supabase/ssr": "latest",
     "@supabase/supabase-js": "latest",
     "@tabler/icons-react": "^3.35.0",
+    "@tanstack/react-query": "^5.100.6",
     "@tanstack/react-table": "^8.21.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "date-fns": "^4.1.0",
     "lucide-react": "^0.556.0",
-    "next": "latest",
+    "next": "16.2.3",
     "next-themes": "^0.4.6",
     "react": "^19.2.1",
     "react-day-picker": "^9.13.0",
@@ -57,11 +62,13 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@types/uuid": "^10.0.0",
+    "@vitest/ui": "^4.1.5",
     "eslint": "^9",
     "eslint-config-next": "16.0.8",
     "postcss": "^8",
     "tailwindcss": "^4.1.17",
     "tailwindcss-animate": "^1.0.7",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^4.1.5"
   }
 }

@@ -16,31 +16,27 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@/lib/supabase/server';
+import { NextResponse } from 'next/server';
+import { z } from 'zod';
+import { validateQuery } from '@/lib/api/validate';
+import { withAuth } from '@/lib/api/with-auth';
 
-export async function GET(req: NextRequest) {
+// Coerce numeric query params with explicit bounds so missing/garbage values
+// can't reach `.range()` as NaN (which previously returned 416 from PostgREST).
+const querySchema = z.object({
+  result: z.enum(['PASS', 'REVIEW', 'FAIL', 'ERROR']).optional(),
+  blockchain: z.string().min(1).max(64).optional(),
+  startDate: z.string().datetime().or(z.string().regex(/^\d{4}-\d{2}-\d{2}/)).optional(),
+  endDate: z.string().datetime().or(z.string().regex(/^\d{4}-\d{2}-\d{2}/)).optional(),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+  offset: z.coerce.number().int().min(0).default(0),
+});
+
+export const GET = withAuth(async (req, { user, supabase }) => {
   try {
-    const supabase = await createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-
-    if (!user) {
-      return NextResponse.json(
-        { error: 'Unauthorized' },
-        { status: 401 }
-      );
-    }
-
-    // Get query parameters for filtering
-    const searchParams = req.nextUrl.searchParams;
-    const result = searchParams.get('result');
-    const blockchain = searchParams.get('blockchain');
-    const startDate = searchParams.get('startDate');
-    const endDate = searchParams.get('endDate');
-    const limit = parseInt(searchParams.get('limit') || '50');
-    const offset = parseInt(searchParams.get('offset') || '0');
+    const parsed = validateQuery(req.nextUrl, querySchema);
+    if (!parsed.ok) return parsed.response;
+    const { result, blockchain, startDate, endDate, limit, offset } = parsed.data;
 
     // Build query
     let query = supabase
@@ -50,8 +46,7 @@ export async function GET(req: NextRequest) {
       .order('created_at', { ascending: false })
       .range(offset, offset + limit - 1);
 
-    // Apply result filter if provided
-    if (result && ['PASS', 'REVIEW', 'FAIL'].includes(result)) {
+    if (result) {
       query = query.eq('result', result);
     }
 
@@ -89,4 +84,4 @@ export async function GET(req: NextRequest) {
       { status: 500 }
     );
   }
-}
+});

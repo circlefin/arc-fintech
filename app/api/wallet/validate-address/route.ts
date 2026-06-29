@@ -16,10 +16,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { circleDeveloperSdk } from "@/lib/circle/developer-controlled-wallets-client";
+import { withAuth } from "@/lib/api/with-auth";
 
-export async function POST(request: NextRequest) {
+export const POST = withAuth(async (request) => {
   try {
     const { address, blockchain } = await request.json();
 
@@ -51,4 +52,4 @@ export async function POST(request: NextRequest) {
       { status: 500 }
     );
   }
-}
+});

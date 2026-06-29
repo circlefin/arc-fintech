@@ -26,6 +26,7 @@ import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { useRouter } from "next/navigation"
 import { cn } from "@/lib/utils"
+import type { FullTransaction, FullWallet } from "@/lib/balances/types"
 
 interface SearchResult {
   id: string
@@ -33,12 +34,12 @@ interface SearchResult {
   title: string
   description: string
   url: string
-  metadata?: any
+  metadata?: FullWallet | FullTransaction
 }
 
 interface GlobalSearchProps {
-  wallets: any[]
-  transactions: any[]
+  wallets: FullWallet[]
+  transactions: FullTransaction[]
   className?: string
 }
 

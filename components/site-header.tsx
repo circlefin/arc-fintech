@@ -22,59 +22,16 @@ import { Separator } from "@/components/ui/separator"
 import { SidebarTrigger } from "@/components/ui/sidebar"
 import { sidebarData } from "@/lib/constants/sidebar-data"
 import { usePathname } from "next/navigation"
-import { useMemo, useState, useEffect } from "react"
+import { useMemo } from "react"
 import { ThemeSwitcher } from "@/components/theme-switcher"
 import { GlobalSearch } from "@/components/global-search"
-import { createClient } from "@/lib/supabase/client"
-
-// Types required for GlobalSearch data
-type Wallet = {
-  id: string
-  name: string
-  address: string
-  blockchain: string
-  type: "treasury" | "payout" | "customer"
-  circle_wallet_id: string
-  created_at: string
-}
-
-type Transaction = {
-  id: string
-  amount: number
-  sender_address: string
-  recipient_address: string
-  created_at: string
-  status: "PENDING" | "CONFIRMED" | "COMPLETE" | "FAILED"
-  type: "INBOUND" | "OUTBOUND"
-  blockchain: "ETH-SEPOLIA" | "BASE-SEPOLIA" | "AVAX-FUJI" | "ARC-TESTNET"
-}
+import { useBalanceContext } from "@/lib/contexts/balance-context"
 
 export function SiteHeader() {
   const pathname = usePathname()
-  const [wallets, setWallets] = useState<Wallet[]>([])
-  const [transactions, setTransactions] = useState<Transaction[]>([])
-  const supabase = createClient()
-
-  // Fetch data for Global Search
-  useEffect(() => {
-    // Only fetch data if we are on the dashboard
-    if (pathname !== "/dashboard") return
-
-    const fetchData = async () => {
-      const { data: { user } } = await supabase.auth.getUser()
-      if (!user) return
-
-      const [walletsResult, transactionsResult] = await Promise.all([
-        supabase.from("wallets").select("*").eq("user_id", user.id),
-        supabase.from("transactions").select("*").eq("user_id", user.id)
-      ])
-
-      if (walletsResult.data) setWallets(walletsResult.data)
-      if (transactionsResult.data) setTransactions(transactionsResult.data)
-    }
-
-    fetchData()
-  }, [supabase, pathname])
+  // Reuse the BalanceContext's wallets+transactions instead of opening a
+  // third Supabase fetch for the global search.
+  const { fullWallets, transactions } = useBalanceContext()
 
   const navTitle = useMemo(() => {
     if (pathname === "/usuarios")
@@ -102,7 +59,7 @@ export function SiteHeader() {
         {/* Global Search: Only visible on /dashboard */}
         {pathname === "/dashboard" && (
           <div className="ml-auto flex-1 max-w-md">
-            <GlobalSearch wallets={wallets} transactions={transactions} />
+            <GlobalSearch wallets={fullWallets} transactions={transactions} />
           </div>
         )}
 

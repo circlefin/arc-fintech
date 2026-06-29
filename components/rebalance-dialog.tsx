@@ -18,110 +18,57 @@
 
 "use client";
 
-import { useState, useEffect } from "react";
-import { IconLoader2, IconBolt, IconClock } from "@tabler/icons-react";
+import { useCallback, useState } from "react";
+import { IconLoader2 } from "@tabler/icons-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { WalletSelect, type WalletOption } from "@/components/wallet-select";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
-import { Card } from "@/components/ui/card";
+import { useBridgeFeeEstimates } from "@/components/dialogs/use-bridge-fee-estimates";
+import { TransferSpeedSelector } from "@/components/dialogs/transfer-speed-selector";
 
 type RebalanceDialogProps = {
   onClose: () => void;
 };
 
-type FeeEstimate = {
-  transferSpeed: "FAST" | "SLOW" | "INSTANT";
-  protocolFees: string;
-  hasGasFees: boolean;
-  estimatedTime: string;
-  available?: boolean;
-  errorMessage?: string;
-  gasFeesInfo?: Array<{ chain: string; token: string; amount: string }>;
-};
-
 export function RebalanceDialog({ onClose }: RebalanceDialogProps) {
   const [isRebalancing, setIsRebalancing] = useState(false);
-  const [isEstimating, setIsEstimating] = useState(false);
 
-  // Form state - storing full wallet objects to access chain info
   const [sourceWallet, setSourceWallet] = useState<WalletOption | null>(null);
   const [destinationWallet, setDestinationWallet] = useState<WalletOption | null>(null);
   const [amount, setAmount] = useState<string>("1");
   const [transferSpeed, setTransferSpeed] = useState<"FAST" | "SLOW">("SLOW");
-  
-  // Fee estimation state
-  const [feeEstimates, setFeeEstimates] = useState<{
-    slow: FeeEstimate | null;
-    fast: FeeEstimate | null;
-    gateway: FeeEstimate | null;
-    recommendation: "FAST" | "SLOW" | "INSTANT" | null;
-    isTestnet?: boolean;
-    gatewayAvailable?: boolean;
-  }>({ slow: null, fast: null, gateway: null, recommendation: null, isTestnet: false, gatewayAvailable: false });
 
-  // Fetch fee estimates when all required fields are filled
-  useEffect(() => {
-    const fetchFeeEstimates = async () => {
-      if (!sourceWallet || !destinationWallet || !amount || parseFloat(amount) <= 0) {
-        setFeeEstimates({ slow: null, fast: null, gateway: null, recommendation: null });
-        return;
-      }
-
-      setIsEstimating(true);
-      try {
-        const response = await fetch("/api/bridge/estimate", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            sourceWalletId: sourceWallet.circle_wallet_id,
-            sourceChain: sourceWallet.blockchain,
-            destinationWalletId: destinationWallet.circle_wallet_id,
-            destinationChain: destinationWallet.blockchain,
-            amount,
-          }),
-        });
-
-        const data = await response.json();
-
-        if (response.ok && data.success) {
-          setFeeEstimates({
-            slow: data.estimates.slow,
-            fast: data.estimates.fast,
-            gateway: null,
-            recommendation: data.recommendation,
-            isTestnet: data.isTestnet,
-          });
-          
-          // Auto-select recommended speed (prefer available option)
-          if (data.estimates.slow.available && data.estimates.fast.available) {
-            setTransferSpeed(data.recommendation);
-          } else if (data.estimates.slow.available) {
-            setTransferSpeed("SLOW");
-          } else if (data.estimates.fast.available) {
-            setTransferSpeed("FAST");
-          }
-        } else {
-          console.error("Failed to estimate fees:", data.error);
+  // The fee-estimate hook auto-selects the recommended speed once both
+  // options come back available; if only one is available we fall back to it.
+  const handleRecommendation = useCallback(
+    (
+      recommendation: "FAST" | "SLOW" | "INSTANT",
+      estimates: { slow: { available?: boolean }; fast: { available?: boolean } }
+    ) => {
+      if (estimates.slow.available && estimates.fast.available) {
+        if (recommendation === "FAST" || recommendation === "SLOW") {
+          setTransferSpeed(recommendation);
         }
-      } catch (error) {
-        console.error("Fee estimation error:", error);
-      } finally {
-        setIsEstimating(false);
+      } else if (estimates.slow.available) {
+        setTransferSpeed("SLOW");
+      } else if (estimates.fast.available) {
+        setTransferSpeed("FAST");
       }
-    };
+    },
+    []
+  );
 
-    // Debounce the fee estimation
-    const timer = setTimeout(fetchFeeEstimates, 500);
-    return () => clearTimeout(timer);
-  }, [sourceWallet, destinationWallet, amount]);
+  const { feeEstimates, isEstimating, reset: resetFeeEstimates } =
+    useBridgeFeeEstimates({
+      sourceWallet,
+      destinationWallet,
+      amount,
+      onRecommendation: handleRecommendation,
+    });
 
   const handleRebalance = async () => {
-    // Validation
     if (!sourceWallet || !destinationWallet || !amount) {
       toast.error("Please fill in all fields");
       return;
@@ -133,7 +80,6 @@ export function RebalanceDialog({ onClose }: RebalanceDialogProps) {
       return;
     }
 
-    // Validate minimum transfer amounts
     const MIN_TRANSFER_AMOUNT = transferSpeed === "FAST" ? 5.0 : 2.0;
     if (amountNum < MIN_TRANSFER_AMOUNT) {
       toast.error("Amount too small", {
@@ -143,7 +89,6 @@ export function RebalanceDialog({ onClose }: RebalanceDialogProps) {
       return;
     }
 
-    // Double check logic (though UI prevents this)
     if (sourceWallet.blockchain === destinationWallet.blockchain) {
       toast.error("Source and destination must be on different chains");
       return;
@@ -152,12 +97,9 @@ export function RebalanceDialog({ onClose }: RebalanceDialogProps) {
     setIsRebalancing(true);
 
     try {
-      // Call the Bridge Kit API endpoint
       const response = await fetch("/api/bridge/rebalance", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           sourceWalletId: sourceWallet.circle_wallet_id,
           sourceChain: sourceWallet.blockchain,
@@ -171,31 +113,32 @@ export function RebalanceDialog({ onClose }: RebalanceDialogProps) {
       const data = await response.json();
 
       if (!response.ok) {
-        // Handle specific error types with better messaging
         if (data.error === "Amount too small") {
-          // Backend validation caught minimum amount issue
           const minAmount = data.minAmount || 2.0;
           const currentAmount = data.currentAmount || parseFloat(amount);
-          
+
           toast.error("Transfer amount too small", {
-            description: data.message || `Minimum transfer amount is ${minAmount} USDC. Your amount: ${currentAmount} USDC. Try a larger amount or different transfer speed.`,
+            description:
+              data.message ||
+              `Minimum transfer amount is ${minAmount} USDC. Your amount: ${currentAmount} USDC. Try a larger amount or different transfer speed.`,
             duration: 6000,
           });
           setIsRebalancing(false);
           return;
         }
-        
-        // Use the user-friendly message if available, otherwise fall back to error
-        const errorMessage = data.message || data.error || "Failed to initiate rebalance";
-        console.error("Rebalance API error:", { 
-          error: data.error, 
-          message: data.message, 
+
+        const errorMessage =
+          data.message || data.error || "Failed to initiate rebalance";
+        console.error("Rebalance API error:", {
+          error: data.error,
+          message: data.message,
           code: data.code,
           type: data.type,
-          fullResponse: data 
+          fullResponse: data,
         });
 
-        // For partial success (approve succeeded but burn failed), provide specific guidance
+        // Approve succeeded but burn failed: surface that so users don't
+        // double-approve.
         if (data.partialSuccess) {
           throw new Error(
             `${errorMessage}\n\nNote: The approval transaction succeeded, so you may need to wait before retrying to avoid duplicate approvals.`
@@ -205,20 +148,26 @@ export function RebalanceDialog({ onClose }: RebalanceDialogProps) {
         throw new Error(errorMessage);
       }
 
-      // Success - close dialog immediately and show progress notification
-      const selectedEstimate = transferSpeed === "FAST" ? feeEstimates.fast : feeEstimates.slow;
-      const transferType = selectedEstimate ? `${transferSpeed} mode` : "instant transfer";
+      // The handler now waits for Bridge Kit to resolve (or the maxDuration
+      // budget to elapse). PENDING means we did not reach finality in-band;
+      // the webhook + bridge/monitor will advance the row.
+      const finalStatus = data.result?.status;
+      if (finalStatus === "COMPLETE") {
+        toast.success("Rebalance complete", {
+          description: `Bridged ${amount} USDC from ${sourceWallet.blockchain} to ${destinationWallet.blockchain}.`,
+          duration: 6000,
+        });
+      } else {
+        toast.success("Rebalance in progress", {
+          description: `Bridging ${amount} USDC from ${sourceWallet.blockchain} to ${destinationWallet.blockchain}. You can close this dialog; the activity feed will update when it settles.`,
+          duration: 8000,
+        });
+      }
 
-      toast.success("Rebalance initiated successfully!", {
-        description: `Bridging ${amount} USDC from ${sourceWallet.blockchain} to ${destinationWallet.blockchain} (${transferType}). This process may take ~20 minutes to complete. You can close this dialog.`,
-        duration: 8000,
-      });
-
-      // Reset form
       setSourceWallet(null);
       setDestinationWallet(null);
       setAmount("1");
-      setFeeEstimates({ slow: null, fast: null, gateway: null, recommendation: null });
+      resetFeeEstimates();
 
       onClose();
     } catch (error) {
@@ -232,18 +181,28 @@ export function RebalanceDialog({ onClose }: RebalanceDialogProps) {
     }
   };
 
+  const showSpeedSelector =
+    !!sourceWallet && !!destinationWallet && !!amount && parseFloat(amount) > 0;
+
   return (
     <div className="grid gap-4 py-4 pb-0">
-      {/* Source Wallet */}
       <div className="grid gap-2">
         <Label>Source Wallet</Label>
         <WalletSelect
-          value={sourceWallet ? `${sourceWallet.address}-${sourceWallet.blockchain}` : ""}
-          onValueChange={() => { }} // Handled by onSelectWallet
+          value={
+            sourceWallet
+              ? `${sourceWallet.address}-${sourceWallet.blockchain}`
+              : ""
+          }
+          onValueChange={() => {}}
           onSelectWallet={(wallet) => {
             setSourceWallet(wallet);
-            // If the new source chain matches the current destination chain, clear destination
-            if (destinationWallet && wallet.blockchain === destinationWallet.blockchain) {
+            // Bridges are cross-chain only; clear destination if it now
+            // collides with the new source.
+            if (
+              destinationWallet &&
+              wallet.blockchain === destinationWallet.blockchain
+            ) {
               setDestinationWallet(null);
             }
           }}
@@ -253,23 +212,39 @@ export function RebalanceDialog({ onClose }: RebalanceDialogProps) {
         />
       </div>
 
-      {/* Destination Wallet */}
       <div className="grid gap-2">
         <Label>Destination Wallet</Label>
         <WalletSelect
-          value={destinationWallet ? `${destinationWallet.address}-${destinationWallet.blockchain}` : ""}
-          onValueChange={() => { }} // Handled by onSelectWallet
+          value={
+            destinationWallet
+              ? `${destinationWallet.address}-${destinationWallet.blockchain}`
+              : ""
+          }
+          onValueChange={() => {}}
           onSelectWallet={setDestinationWallet}
-          placeholder={!sourceWallet ? "Select source wallet first" : "Select destination wallet"}
+          placeholder={
+            !sourceWallet
+              ? "Select source wallet first"
+              : "Select destination wallet"
+          }
           disabled={!sourceWallet || isRebalancing}
-          // Logic: Exclude the source wallet itself AND exclude the source chain (Cross-chain only)
-          excludeAddress={sourceWallet?.address}
+          // Cross-chain only: exclude the source wallet itself (by
+          // address+chain tuple, since Circle SCA wallets share the same
+          // address across chains) and exclude the source chain so the
+          // destination is on a different chain.
+          excludeWallet={
+            sourceWallet
+              ? {
+                  address: sourceWallet.address,
+                  blockchain: sourceWallet.blockchain,
+                }
+              : undefined
+          }
           excludeChain={sourceWallet?.blockchain}
           excludeGatewaySigner={true}
         />
       </div>
 
-      {/* Amount */}
       <div className="grid gap-2">
         <Label htmlFor="amount">Amount (USDC)</Label>
         <Input
@@ -285,100 +260,21 @@ export function RebalanceDialog({ onClose }: RebalanceDialogProps) {
         />
         {sourceWallet && destinationWallet && (
           <p className="text-xs text-muted-foreground">
-            Minimum: {transferSpeed === "FAST" ? "5.0" : "2.0"} USDC for {transferSpeed === "FAST" ? "Fast" : "Standard"} transfers
+            Minimum: {transferSpeed === "FAST" ? "5.0" : "2.0"} USDC for{" "}
+            {transferSpeed === "FAST" ? "Fast" : "Standard"} transfers
           </p>
         )}
       </div>
 
-      {/* Transfer Speed Selection */}
-      {sourceWallet && destinationWallet && amount && parseFloat(amount) > 0 && (
-        <div className="grid gap-2">
-          <Label>Transfer Speed</Label>
-          {isEstimating ? (
-            <div className="flex items-center justify-center py-4 text-sm text-muted-foreground">
-              <IconLoader2 className="size-4 animate-spin mr-2" />
-              Estimating fees...
-            </div>
-          ) : feeEstimates.slow && feeEstimates.fast ? (
-            <div className="space-y-2">
-              <ToggleGroup
-                type="single"
-                value={transferSpeed}
-                onValueChange={(value) => {
-                  if (value) setTransferSpeed(value as "FAST" | "SLOW");
-                }}
-                className="grid grid-cols-2 gap-2"
-              >
-                <ToggleGroupItem
-                  value="SLOW"
-                  disabled={feeEstimates.slow.available === false}
-                  className="flex flex-col items-start p-3 h-auto data-[state=on]:bg-primary data-[state=on]:text-primary-foreground disabled:opacity-50"
-                >
-                  <div className="flex items-center gap-2 mb-1">
-                    <IconClock className="size-4" />
-                    <span className="font-medium">Standard</span>
-                    {feeEstimates.recommendation === "SLOW" && feeEstimates.slow.available !== false && (
-                      <span className="text-[10px] bg-green-500 text-white px-1 rounded">Recommended</span>
-                    )}
-                  </div>
-                  <div className="text-xs opacity-80">{feeEstimates.slow.estimatedTime}</div>
-                  {feeEstimates.slow.available === false ? (
-                    <div className="text-xs text-destructive mt-1">Not available</div>
-                  ) : (
-                    <div className="text-xs font-medium mt-1">
-                      Fee: {parseFloat(feeEstimates.slow.protocolFees).toFixed(4)} USDC
-                      {feeEstimates.isTestnet && parseFloat(feeEstimates.slow.protocolFees) === 0 && (
-                        <span className="ml-1 text-muted-foreground">(Testnet)</span>
-                      )}
-                    </div>
-                  )}
-                </ToggleGroupItem>
-                <ToggleGroupItem
-                  value="FAST"
-                  disabled={feeEstimates.fast.available === false}
-                  className="flex flex-col items-start p-3 h-auto data-[state=on]:bg-primary data-[state=on]:text-primary-foreground disabled:opacity-50"
-                >
-                  <div className="flex items-center gap-2 mb-1">
-                    <IconBolt className="size-4" />
-                    <span className="font-medium">Fast</span>
-                    {feeEstimates.recommendation === "FAST" && feeEstimates.fast.available !== false && (
-                      <span className="text-[10px] bg-green-500 text-white px-1 rounded">Recommended</span>
-                    )}
-                  </div>
-                  <div className="text-xs opacity-80">{feeEstimates.fast.estimatedTime}</div>
-                  {feeEstimates.fast.available === false ? (
-                    <div className="text-xs text-destructive mt-1">Not available</div>
-                  ) : (
-                    <div className="text-xs font-medium mt-1">
-                      Fee: {parseFloat(feeEstimates.fast.protocolFees).toFixed(4)} USDC
-                      {feeEstimates.isTestnet && parseFloat(feeEstimates.fast.protocolFees) === 0 && (
-                        <span className="ml-1 text-muted-foreground">(Testnet)</span>
-                      )}
-                    </div>
-                  )}
-                </ToggleGroupItem>
-              </ToggleGroup>
-              {feeEstimates.isTestnet && (
-                <p className="text-xs text-muted-foreground bg-muted p-2 rounded">
-                  ℹ️ Testnet transfers may have reduced or zero fees. Mainnet fees will apply in production.
-                </p>
-              )}
-              <div className="space-y-1">
-                <p className="text-xs text-muted-foreground">
-                  {transferSpeed === "FAST" 
-                    ? "Fast transfers use Circle's fast burn for quicker confirmation" 
-                    : "Standard transfers are cost-effective and reliable"}
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  Minimum amount: <span className="font-medium">{transferSpeed === "FAST" ? "5.0" : "2.0"} USDC</span>
-                </p>
-              </div>
-            </div>
-          ) : null}
-        </div>
+      {showSpeedSelector && (
+        <TransferSpeedSelector
+          feeEstimates={feeEstimates}
+          isEstimating={isEstimating}
+          transferSpeed={transferSpeed}
+          onChange={setTransferSpeed}
+        />
       )}
 
-      {/* Action Button */}
       <Button
         onClick={handleRebalance}
         disabled={

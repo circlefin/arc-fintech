@@ -17,7 +17,9 @@
  */
 
 // Compliance result types
-export type ComplianceResult = 'PASS' | 'REVIEW' | 'FAIL';
+// ERROR signals that screening could not be completed (network/API outage, etc.)
+// and the caller MUST NOT treat the address as approved.
+export type ComplianceResult = 'PASS' | 'REVIEW' | 'FAIL' | 'ERROR';
 
 export type ComplianceAction = 'APPROVE' | 'DENY' | 'FREEZE_WALLET' | 'REVIEW';
 

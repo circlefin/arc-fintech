@@ -47,7 +47,19 @@ interface WalletSelectProps {
   placeholder?: string
   chainFilter?: string
   excludeChain?: string
+  /**
+   * Exclude every wallet at this address regardless of chain. Use this only
+   * when the dropdown is already constrained to a single chain (e.g. via
+   * chainFilter), since Circle SCA wallets share the same address across
+   * chains. For cross-chain dropdowns prefer excludeWallet.
+   */
   excludeAddress?: string
+  /**
+   * Exclude exactly one (address, chain) wallet. Safe for cross-chain
+   * dropdowns because it does not knock out the user's other wallets that
+   * share the SCA address on different chains.
+   */
+  excludeWallet?: { address: string; blockchain: string }
   excludeGatewaySigner?: boolean
   excludeArcWallets?: boolean
   minBalance?: number
@@ -62,6 +74,7 @@ export function WalletSelect({
   chainFilter,
   excludeChain,
   excludeAddress,
+  excludeWallet,
   excludeGatewaySigner = false,
   excludeArcWallets = false,
   minBalance,
@@ -120,6 +133,14 @@ export function WalletSelect({
       result = result.filter((w) => w.address !== excludeAddress)
     }
 
+    if (excludeWallet) {
+      const exAddr = excludeWallet.address.toLowerCase()
+      const exChain = excludeWallet.blockchain
+      result = result.filter(
+        (w) => !(w.address.toLowerCase() === exAddr && w.blockchain === exChain)
+      )
+    }
+
     if (excludeGatewaySigner) {
       result = result.filter((w) => w.type !== "gateway_signer")
     }
@@ -151,7 +172,7 @@ export function WalletSelect({
     })
 
     return result
-  }, [wallets, chainFilter, excludeChain, excludeAddress, excludeGatewaySigner, excludeArcWallets, minBalance, walletBalances])
+  }, [wallets, chainFilter, excludeChain, excludeAddress, excludeWallet, excludeGatewaySigner, excludeArcWallets, minBalance, walletBalances])
 
   // Helper to format chain names nicely
   const formatChainName = (chain: string) => {
