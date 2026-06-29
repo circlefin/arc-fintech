@@ -20,20 +20,33 @@ import crypto from "crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
-const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY,
-  {
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false,
-    },
+// Fail fast at module load if the webhook's required env vars aren't
+// configured. This is a service-role + public-URL pair: missing either
+// silently turned dedupe insertions into runtime errors, which is much
+// harder to debug than refusing to boot.
+function requireEnv(name: string): string {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(`Missing required environment variable: ${name}`);
   }
-);
+  return value;
+}
+
+const SUPABASE_URL = requireEnv("NEXT_PUBLIC_SUPABASE_URL");
+const SUPABASE_SERVICE_ROLE_KEY = requireEnv("SUPABASE_SERVICE_ROLE_KEY");
+
+const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  auth: {
+    autoRefreshToken: false,
+    persistSession: false,
+  },
+});
 
 type CircleNotification = {
   id: string;
   state: string;
+  txHash?: string;
+  errorReason?: string;
   [k: string]: unknown;
 };
 
@@ -43,7 +56,11 @@ interface CircleWebhookPayload {
   [k: string]: unknown;
 }
 
-async function verifyCircleSignature(bodyString: string, signature: string, keyId: string): Promise<boolean> {
+async function verifyCircleSignature(
+  bodyString: string,
+  signature: string,
+  keyId: string
+): Promise<boolean> {
   try {
     const publicKey = await getCirclePublicKey(keyId);
     const verifier = crypto.createVerify("SHA256");
@@ -52,130 +69,152 @@ async function verifyCircleSignature(bodyString: string, signature: string, keyI
     const signatureUint8Array = Uint8Array.from(Buffer.from(signature, "base64"));
     return verifier.verify(publicKey, signatureUint8Array);
   } catch (e) {
-    console.error("Signature `verification` failure:", e);
+    console.error("Signature verification failure:", e);
     return false;
   }
 }
 
 async function getCirclePublicKey(keyId: string) {
   if (!process.env.CIRCLE_API_KEY) throw new Error("Circle API key is not set");
-  const response = await fetch(`https://api.circle.com/v2/notifications/publicKey/${keyId}`, {
-    headers: { Accept: "application/json", Authorization: `Bearer ${process.env.CIRCLE_API_KEY}` },
-  });
+  const response = await fetch(
+    `https://api.circle.com/v2/notifications/publicKey/${keyId}`,
+    {
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${process.env.CIRCLE_API_KEY}`,
+      },
+    }
+  );
   if (!response.ok) throw new Error(`Failed to fetch public key`);
   const data = await response.json();
   const rawPublicKey = data?.data?.publicKey;
-  return ["-----BEGIN PUBLIC KEY-----", ...(rawPublicKey.match(/.{1,64}/g) ?? []), "-----END PUBLIC KEY-----"].join("\n");
+  return [
+    "-----BEGIN PUBLIC KEY-----",
+    ...(rawPublicKey.match(/.{1,64}/g) ?? []),
+    "-----END PUBLIC KEY-----",
+  ].join("\n");
 }
-
-// Helper to wait (for retries)
-const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export async function POST(req: NextRequest) {
   try {
     const signature = req.headers.get("x-circle-signature");
     const keyId = req.headers.get("x-circle-key-id");
 
-    if (!signature || !keyId) return NextResponse.json({ error: "Missing headers" }, { status: 400 });
+    if (!signature || !keyId) {
+      return NextResponse.json({ error: "Missing headers" }, { status: 400 });
+    }
 
     const rawBody = await req.text();
     const isVerified = await verifyCircleSignature(rawBody, signature, keyId);
-    if (!isVerified) return NextResponse.json({ error: "Invalid signature" }, { status: 403 });
+    if (!isVerified) {
+      return NextResponse.json({ error: "Invalid signature" }, { status: 403 });
+    }
 
     const body: CircleWebhookPayload = JSON.parse(rawBody);
     const { notificationType, notification } = body;
 
-    if (notificationType === "transactions.outbound" || notificationType === "transactions.inbound") {
-      // DB Enum only supports 'PENDING', 'CONFIRMED', 'COMPLETE'
-      const statusMap: Record<string, "CONFIRMED" | "COMPLETE" | null> = {
-        CONFIRMED: "CONFIRMED",
-        COMPLETE: "COMPLETE",
-        FAILED: null, // Cannot map FAILED to DB Enum
-      };
+    // Idempotency: try to insert the event. If the notification id has been
+    // seen before, the unique constraint on webhook_events.notification_id
+    // rejects the insert and we ack with 200 without doing the side effects
+    // again. This replaces the previous in-handler 30s retry loop, which
+    // both blocked the response and could double-apply state on retries.
+    //
+    // The previous schema also wrote `circle_transaction_id: notification.id`
+    // alongside `notification_id`. That was a holdover from when the two
+    // fields meant different things; today they're identical, so we only
+    // store `notification_id`.
+    const { error: insertErr } = await supabaseAdmin
+      .from("webhook_events")
+      .insert({
+        notification_id: notification.id,
+        notification_type: notificationType,
+        state: notification.state,
+        payload: body as unknown as Record<string, unknown>,
+      });
 
-      const newStatus = statusMap[notification.state];
+    if (insertErr) {
+      // Postgres unique-violation code is 23505. Anything else is a real error.
+      const code = (insertErr as { code?: string }).code;
+      if (code === "23505") {
+        return NextResponse.json({ received: true, duplicate: true }, { status: 200 });
+      }
+      // Refuse to apply the side-effects when dedupe is broken — the
+      // previous behaviour was to fall through, which made it possible to
+      // double-apply transaction updates whenever the dedupe insert failed
+      // for non-duplicate reasons (e.g. RLS misconfig). Circle will retry,
+      // and once dedupe works the next attempt will succeed exactly once.
+      console.error("Failed to record webhook event:", insertErr);
+      return NextResponse.json(
+        { error: "Failed to record webhook event" },
+        { status: 500 }
+      );
+    }
+
+    if (
+      notificationType === "transactions.outbound" ||
+      notificationType === "transactions.inbound"
+    ) {
+      // The transaction_status enum only contains PENDING, CONFIRMED, COMPLETE,
+      // FAILED. Anything outside that maps to a no-op.
+      const allowedStates = ["PENDING", "CONFIRMED", "COMPLETE", "FAILED"] as const;
+      type AllowedState = (typeof allowedStates)[number];
+      const newStatus: AllowedState | null = (allowedStates as readonly string[]).includes(
+        notification.state
+      )
+        ? (notification.state as AllowedState)
+        : null;
 
       if (notification.state === "FAILED") {
-        console.error(`Transaction ${notification.id} FAILED on chain. Reason: ${(notification as any).errorReason}`);
-        // Optional: Delete transaction or mark differently if possible. 
-        // For now, we skip update to avoid DB error.
-      } else if (newStatus) {
-        const txHash = (notification as any).txHash;
+        console.error(
+          `Transaction ${notification.id} FAILED on chain. Reason: ${notification.errorReason ?? "unknown"}`
+        );
+      }
 
-        // Retry Logic Configuration
-        let attempts = 0;
-        let updated = false;
-        const MAX_ATTEMPTS = 10;
-        const RETRY_DELAY_MS = 3000;
-
-        while (attempts < MAX_ATTEMPTS && !updated) {
-          // Try circle_transaction_id first (works for OUTBOUND, deposits, etc.)
-          // Then fallback to tx_hash for REBALANCE transactions (which don't have circle_transaction_id)
-
-          // 1. First attempt: Match by circle_transaction_id (standard transactions like OUTBOUND)
-          const updateData: any = {
-            status: newStatus,
-            circle_transaction_id: notification.id,
-            updated_at: new Date().toISOString(),
-          };
-          
-          // Add tx_hash to update if available
-          if (txHash) {
-            updateData.tx_hash = txHash;
-          }
-          
-          const standardQuery = supabaseAdmin
-            .from("transactions")
-            .update(updateData)
-            .eq("circle_transaction_id", notification.id);
-
-          const { error: standardError, count: standardCount } = await standardQuery.select("id");
-
-          if (standardError) {
-            console.error("Supabase update error (standard):", standardError);
-            break;
-          }
-
-          if (standardCount && standardCount > 0) {
-            updated = true;
-            break;
-          }
-
-          // 2. Second attempt: If we have a txHash and first attempt failed, try matching REBALANCE by tx_hash
-          if (txHash) {
-            const rebalanceUpdateData: any = {
-              status: newStatus,
-              circle_transaction_id: notification.id,
-              tx_hash: txHash,
-              updated_at: new Date().toISOString(),
-            };
-            
-            const rebalanceQuery = supabaseAdmin
-              .from("transactions")
-              .update(rebalanceUpdateData)
-              .eq("tx_hash", txHash)
-              .eq("type", "REBALANCE");
-
-            const { error: rebalanceError, count: rebalanceCount } = await rebalanceQuery.select("id");
-
-            if (rebalanceError) {
-              console.error("Supabase update error (rebalance):", rebalanceError);
-              break;
-            }
-
-          if (rebalanceCount && rebalanceCount > 0) {
-            updated = true;
-            break;
-          }
-          }
-
-          // Neither match found yet, retry after delay
-          attempts++;
-          if (attempts < MAX_ATTEMPTS) {
-            await wait(RETRY_DELAY_MS);
-          }
+      if (newStatus) {
+        const txHash = notification.txHash;
+        // We filter by circle_transaction_id below — no need to also write
+        // it back into the row (the previous duplicate write was harmless
+        // but confusing).
+        const updatePayload: Record<string, unknown> = {
+          status: newStatus,
+          updated_at: new Date().toISOString(),
+        };
+        if (txHash) {
+          updatePayload.tx_hash = txHash;
         }
 
+        // Single-pass update. We try matching by circle_transaction_id first
+        // (the common case), and if no rows match and we have a tx_hash, also
+        // try matching REBALANCE rows by tx_hash. There is no inline retry
+        // loop: if neither matches, the originating API call hasn't written
+        // its row yet and a later webhook (or polling) will reconcile.
+        const { data: stdRows, error: stdErr } = await supabaseAdmin
+          .from("transactions")
+          .update(updatePayload)
+          .eq("circle_transaction_id", notification.id)
+          .select("id");
+
+        if (stdErr) {
+          console.error("Supabase update error (standard):", stdErr);
+        }
+
+        if ((stdRows?.length ?? 0) === 0 && txHash) {
+          // Fallback: match by tx_hash. We use this for rows that were
+          // inserted without a Circle DCW transaction id — REBALANCE rows
+          // (Bridge Kit) and Gateway deposits routed through App Kit, both
+          // of which return only the on-chain hash, not the underlying DCW
+          // transaction id used by the webhook payload.
+          const { error: rebalErr } = await supabaseAdmin
+            .from("transactions")
+            .update(updatePayload)
+            .eq("tx_hash", txHash)
+            .in("type", ["REBALANCE", "OUTBOUND"])
+            .select("id");
+
+          if (rebalErr) {
+            console.error("Supabase update error (tx_hash fallback):", rebalErr);
+          }
+        }
       }
     }
 

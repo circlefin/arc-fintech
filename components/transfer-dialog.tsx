@@ -18,7 +18,7 @@
 
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { IconArrowsLeftRight, IconLoader2 } from "@tabler/icons-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -35,12 +35,11 @@ import {
 } from "@/components/ui/dialog";
 import { ComplianceStatusBadge } from "@/components/compliance-status-badge";
 import { ComplianceDetailsDialog } from "@/components/compliance-details-dialog";
-import { ComplianceCheckResponse } from "@/types/compliance";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { AlertTriangle, Info } from "lucide-react";
 import { toast } from "sonner";
-import { isValidAddress } from "@/lib/compliance/utils";
 import { WalletSelect, type WalletOption } from "@/components/wallet-select";
+import { useComplianceCheck } from "@/components/dialogs/use-compliance-check";
 
 export function TransferDialog() {
   const [open, setOpen] = useState(false);
@@ -49,124 +48,27 @@ export function TransferDialog() {
   const [recipientAddress, setRecipientAddress] = useState("");
   const [recipientCompositeValue, setRecipientCompositeValue] = useState("");
 
-  // Compliance & Status
-  const [complianceData, setComplianceData] = useState<ComplianceCheckResponse | null>(null);
-  const [isCheckingCompliance, setIsCheckingCompliance] = useState(false);
+  // Compliance + chain validation lives in a shared hook so this dialog and
+  // the SendButton stay in sync about when to block/warn.
+  const {
+    complianceData,
+    isCheckingCompliance,
+    isValidatingAddress,
+    addressError,
+    canReceiveUSDC,
+    isBlocked,
+    needsReview,
+    setAddressError,
+    reset: resetCompliance,
+  } = useComplianceCheck({
+    address: recipientAddress,
+    chain: sourceWallet?.blockchain,
+    validateChainCompatibility: true,
+  });
+
   const [isTransferring, setIsTransferring] = useState(false);
   const [showComplianceDetails, setShowComplianceDetails] = useState(false);
   const [showReviewWarning, setShowReviewWarning] = useState(false);
-  const [addressError, setAddressError] = useState<string>("");
-  const [isValidatingAddress, setIsValidatingAddress] = useState(false);
-  const [canReceiveUSDC, setCanReceiveUSDC] = useState<boolean | null>(null);
-
-  // Debounced compliance check and address validation
-  useEffect(() => {
-    if (!recipientAddress) {
-      setComplianceData(null);
-      setAddressError("");
-      setCanReceiveUSDC(null);
-      return;
-    }
-
-    if (recipientAddress.length > 0 && !isValidAddress(recipientAddress)) {
-      setComplianceData(null);
-      setAddressError("Invalid blockchain address format");
-      setCanReceiveUSDC(null);
-      return;
-    }
-
-    setAddressError("");
-
-    if (recipientAddress.length < 10) {
-      setComplianceData(null);
-      setCanReceiveUSDC(null);
-      return;
-    }
-
-    const timer = setTimeout(async () => {
-      await validateAddress();
-      await checkCompliance();
-    }, 500);
-
-    return () => clearTimeout(timer);
-  }, [recipientAddress, sourceWallet?.blockchain]);
-
-  const validateAddress = async () => {
-    if (!recipientAddress || recipientAddress.length < 10 || !sourceWallet) return;
-
-    if (!isValidAddress(recipientAddress)) {
-      return;
-    }
-
-    setIsValidatingAddress(true);
-    try {
-      const response = await fetch("/api/wallet/validate-address", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          address: recipientAddress,
-          blockchain: sourceWallet.blockchain,
-        }),
-      });
-
-      const data = await response.json();
-      setCanReceiveUSDC(data.isValid);
-
-      if (!data.isValid) {
-        setAddressError("This address cannot receive USDC on the selected chain");
-      }
-    } catch (error) {
-      console.error("Address validation failed:", error);
-      // Don't block on validation errors, just log them
-      setCanReceiveUSDC(null);
-    } finally {
-      setIsValidatingAddress(false);
-    }
-  };
-
-  const checkCompliance = async () => {
-    if (!recipientAddress || recipientAddress.length < 10) return;
-
-    if (!isValidAddress(recipientAddress)) {
-      toast.error("Invalid Address", {
-        description: "Please enter a valid blockchain address.",
-      });
-      return;
-    }
-
-    setIsCheckingCompliance(true);
-    try {
-      const response = await fetch("/api/compliance/screen", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          address: recipientAddress,
-          // We pass the source chain for context if available, though API handles it optionally
-          chain: sourceWallet?.blockchain
-        }),
-      });
-
-      const data: ComplianceCheckResponse = await response.json();
-      setComplianceData(data);
-
-      if (data.result === "FAIL") {
-        toast.error("Address Blocked", {
-          description: "This address has been flagged for compliance violations.",
-        });
-      } else if (data.result === "REVIEW") {
-        toast.warning("Review Required", {
-          description: "This address requires manual review before proceeding.",
-        });
-      }
-    } catch (error) {
-      console.error("Compliance check failed:", error);
-      toast.error("Compliance check failed", {
-        description: "Unable to verify address. Please try again.",
-      });
-    } finally {
-      setIsCheckingCompliance(false);
-    }
-  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -179,6 +81,13 @@ export function TransferDialog() {
     if (complianceData?.result === "FAIL") {
       toast.error("Transfer Blocked", {
         description: "This address is blocked and cannot receive transfers.",
+      });
+      return;
+    }
+
+    if (complianceData?.result === "ERROR") {
+      toast.error("Screening Unavailable", {
+        description: "Cannot transfer until compliance screening succeeds. Please retry the check.",
       });
       return;
     }
@@ -227,14 +136,9 @@ export function TransferDialog() {
     setAmount("1");
     setRecipientAddress("");
     setRecipientCompositeValue("");
-    setComplianceData(null);
     setShowReviewWarning(false);
-    setAddressError("");
-    setCanReceiveUSDC(null);
+    resetCompliance();
   };
-
-  const isBlocked = complianceData?.result === "FAIL";
-  const needsReview = complianceData?.result === "REVIEW";
 
   return (
     <>
@@ -270,8 +174,7 @@ export function TransferDialog() {
                     setSourceWallet(wallet);
                     setRecipientAddress("");
                     setRecipientCompositeValue("");
-                    setComplianceData(null);
-                    setCanReceiveUSDC(null);
+                    resetCompliance();
                   }}
                   placeholder="Select source wallet"
                   disabled={isTransferring}

@@ -16,8 +16,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// Next.js 16 root-level middleware (replaces middleware.ts). Picked up
+// automatically by the framework via the exported `proxy` function and
+// `config.matcher` below — do not delete or rename without updating both.
+//
+// See: https://nextjs.org/docs/app/api-reference/file-conventions/proxy
+
 import { NextResponse, type NextRequest } from "next/server";
 import { createSupabaseReqResClient } from "@/lib/supabase/server-client";
+
+const PROTECTED_PREFIXES = ["/dashboard", "/details"];
+
+function startsWithAny(pathname: string, prefixes: string[]): boolean {
+  return prefixes.some((prefix) => pathname.startsWith(prefix));
+}
 
 export async function proxy(request: NextRequest) {
   const response = NextResponse.next({
@@ -26,27 +38,39 @@ export async function proxy(request: NextRequest) {
     },
   });
 
-  const supabase = createSupabaseReqResClient(request, response);
-
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  // Skip redirect logic for API routes
+  // API routes do their own per-route auth checks. Skip proxy logic.
   if (request.nextUrl.pathname.startsWith("/api")) {
     return response;
   }
 
-  if (!user && request.nextUrl.pathname.startsWith("/dashboard")) {
-    return NextResponse.redirect(new URL("/", request.url));
+  const supabase = createSupabaseReqResClient(request, response);
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  const { pathname } = request.nextUrl;
+  const isProtected = startsWithAny(pathname, PROTECTED_PREFIXES);
+
+  // Unauthenticated users hitting a protected route get bounced to login.
+  if (!user && isProtected) {
+    const url = request.nextUrl.clone();
+    url.pathname = "/auth/login";
+    return NextResponse.redirect(url);
   }
 
-  // Allow authenticated users to access dashboard, details, and other protected routes
-  const protectedRoutes = ["/dashboard", "/details"];
-  const isProtectedRoute = protectedRoutes.some(route => request.nextUrl.pathname.startsWith(route));
-  
-  if (user && !isProtectedRoute) {
-    return NextResponse.redirect(new URL("/dashboard", request.url));
+  // Authenticated users hitting login/signup/landing get bounced to the
+  // dashboard, but auth flows like confirm/update-password/forgot-password/
+  // error must remain reachable so password resets and email confirmations
+  // still work for already-logged-in users.
+  if (
+    user &&
+    (pathname === "/auth/login" ||
+      pathname === "/auth/sign-up" ||
+      pathname === "/")
+  ) {
+    const url = request.nextUrl.clone();
+    url.pathname = "/dashboard";
+    return NextResponse.redirect(url);
   }
 
   return response;
@@ -60,7 +84,6 @@ export const config = {
      * - _next/image (image optimization files)
      * - favicon.ico (favicon file)
      * - images - .svg, .png, .jpg, .jpeg, .gif, .webp
-     * Feel free to modify this pattern to include more paths.
      */
     "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
   ],

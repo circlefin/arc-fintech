@@ -16,143 +16,45 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { NextResponse } from "next/server";
 import { circleDeveloperSdk } from "@/lib/circle/developer-controlled-wallets-client";
-import { 
+import { withAuth } from "@/lib/api/with-auth";
+import {
   signAndSubmitGatewayBurnIntent,
   executeGatewayMint,
-  transferUnifiedBalanceCircle,
-  CIRCLE_CHAIN_NAMES,
   type SupportedChain,
   getUsdcBalance,
   fetchGatewayBalance,
-  GATEWAY_MINTER_ADDRESS,
-  submitBurnIntent,
-  DOMAIN_IDS,
-  USDC_ADDRESSES,
   GATEWAY_WALLET_ADDRESS,
+  PollingTimeoutError,
 } from "@/lib/circle/gateway-sdk";
-import { CHAIN_TO_USDC_ADDRESS } from "@/lib/constants/usdc-addresses";
-import type { Address, Hash } from "viem";
-import { randomBytes } from "crypto";
-import { maxUint256, zeroAddress, pad } from "viem";
-
-const BLOCKCHAIN_TO_CHAIN: Record<string, SupportedChain> = {
-  "ETH-SEPOLIA": "ethSepolia",
-  "BASE-SEPOLIA": "baseSepolia",
-  "AVAX-FUJI": "avalancheFuji",
-  "ARC-TESTNET": "arcTestnet",
-};
-
-const CHAIN_TO_BLOCKCHAIN: Record<SupportedChain, string> = {
-  "ethSepolia": "ETH-SEPOLIA",
-  "baseSepolia": "BASE-SEPOLIA",
-  "avalancheFuji": "AVAX-FUJI",
-  "arcTestnet": "ARC-TESTNET",
-};
-
-const CHAIN_LABELS: Record<SupportedChain, string> = {
-  "ethSepolia": "Ethereum Sepolia",
-  "baseSepolia": "Base Sepolia",
-  "avalancheFuji": "Avalanche Fuji",
-  "arcTestnet": "Arc Testnet",
-};
-
-// Gateway fee estimates per chain (in USDC)
-// Based on https://developers.circle.com/gateway/references/fees
-const GATEWAY_FEES: Record<SupportedChain, number> = {
-  "ethSepolia": 2.01,     // Ethereum: ~$2.01
-  "baseSepolia": 0.01,    // Base: ~$0.01
-  "avalancheFuji": 0.50,  // Avalanche: ~$0.50
-  "arcTestnet": 0.01,     // Arc: ~$0.01 (estimate, similar to Base)
-};
+import {
+  createCircleWalletsAdapterInstance,
+  getAppKit,
+} from "@/lib/circle/app-kit";
+import {
+  buildUnifiedBalanceGatewayAllocatedSources,
+  getUnifiedBalancePayoutError,
+  normalizeUnifiedBalanceGatewaySpendResult,
+  planUnifiedBalanceGatewayAllocations,
+} from "@/lib/circle/unified-balance-payout";
+import {
+  getAppKitSendError,
+  sendUsdcOnSameChainWithAppKit,
+} from "@/lib/circle/app-kit-send";
+import {
+  APP_KIT_CHAIN_BY_BLOCKCHAIN,
+  type AppKitChain,
+  SDK_CHAIN_BY_BLOCKCHAIN as BLOCKCHAIN_TO_CHAIN,
+  BLOCKCHAIN_BY_SDK_CHAIN as CHAIN_TO_BLOCKCHAIN,
+  CHAIN_LABEL_BY_SDK_CHAIN as CHAIN_LABELS,
+} from "@/lib/constants/chains";
+import type { Address } from "viem";
 
 function convertToSmallestUnit(amount: string): string {
   const val = parseFloat(amount);
   if (isNaN(val)) return "0";
   return BigInt(Math.floor(val * 1_000_000)).toString();
-}
-
-function addressToBytes32(address: Address): `0x${string}` {
-  return pad(address.toLowerCase() as Address, { size: 32 });
-}
-
-const EIP712Domain = [
-  { name: "name", type: "string" },
-  { name: "version", type: "string" },
-] as const;
-
-const TransferSpec = [
-  { name: "version", type: "uint32" },
-  { name: "sourceDomain", type: "uint32" },
-  { name: "destinationDomain", type: "uint32" },
-  { name: "sourceContract", type: "bytes32" },
-  { name: "destinationContract", type: "bytes32" },
-  { name: "sourceToken", type: "bytes32" },
-  { name: "destinationToken", type: "bytes32" },
-  { name: "sourceDepositor", type: "bytes32" },
-  { name: "destinationRecipient", type: "bytes32" },
-  { name: "sourceSigner", type: "bytes32" },
-  { name: "destinationCaller", type: "bytes32" },
-  { name: "value", type: "uint256" },
-  { name: "salt", type: "bytes32" },
-  { name: "hookData", type: "bytes" },
-] as const;
-
-const BurnIntent = [
-  { name: "maxBlockHeight", type: "uint256" },
-  { name: "maxFee", type: "uint256" },
-  { name: "spec", type: "TransferSpec" },
-] as const;
-
-interface BurnIntentSpec {
-  version: number;
-  sourceDomain: number;
-  destinationDomain: number;
-  sourceContract: Address;
-  destinationContract: Address;
-  sourceToken: Address;
-  destinationToken: Address;
-  sourceDepositor: Address;
-  destinationRecipient: Address;
-  sourceSigner: Address;
-  destinationCaller: Address;
-  value: bigint;
-  salt: `0x${string}`;
-  hookData: `0x${string}`;
-}
-
-interface BurnIntentData {
-  maxBlockHeight: bigint;
-  maxFee: bigint;
-  spec: BurnIntentSpec;
-}
-
-function burnIntentTypedData(burnIntent: BurnIntentData) {
-  const domain = {
-    name: "GatewayWallet",
-    version: "1",
-  };
-  return {
-    types: { EIP712Domain, TransferSpec, BurnIntent },
-    domain,
-    primaryType: "BurnIntent" as const,
-    message: {
-      ...burnIntent,
-      spec: {
-        ...burnIntent.spec,
-        sourceContract: addressToBytes32(burnIntent.spec.sourceContract),
-        destinationContract: addressToBytes32(burnIntent.spec.destinationContract),
-        sourceToken: addressToBytes32(burnIntent.spec.sourceToken),
-        destinationToken: addressToBytes32(burnIntent.spec.destinationToken),
-        sourceDepositor: addressToBytes32(burnIntent.spec.sourceDepositor),
-        destinationRecipient: addressToBytes32(burnIntent.spec.destinationRecipient),
-        sourceSigner: addressToBytes32(burnIntent.spec.sourceSigner),
-        destinationCaller: addressToBytes32(burnIntent.spec.destinationCaller),
-      },
-    },
-  };
 }
 
 async function getCircleWalletAddress(walletId: string): Promise<Address> {
@@ -163,73 +65,6 @@ async function getCircleWalletAddress(walletId: string): Promise<Address> {
   return response.data.wallet.address as Address;
 }
 
-async function signBurnIntentCircle(
-  walletId: string,
-  burnIntentData: BurnIntentData
-): Promise<`0x${string}`> {
-  const typedData = burnIntentTypedData(burnIntentData);
-
-  // Serialize bigints to strings first
-  const serializedData = JSON.stringify(typedData, (_key, value) =>
-    typeof value === "bigint" ? value.toString() : value
-  );
-
-  // Parse and convert all numeric fields in message.spec to strings
-  const parsed = JSON.parse(serializedData);
-  if (parsed.message?.spec) {
-    parsed.message.spec.version = String(parsed.message.spec.version);
-    parsed.message.spec.sourceDomain = String(parsed.message.spec.sourceDomain);
-    parsed.message.spec.destinationDomain = String(parsed.message.spec.destinationDomain);
-  }
-
-  const finalData = JSON.stringify(parsed);
-  console.log("Final typed data being sent to Circle:", finalData);
-
-  try {
-    const response = await circleDeveloperSdk.signTypedData({
-      walletId,
-      data: finalData,
-    });
-
-    const signature = response.data?.signature;
-
-    if (!signature) {
-      throw new Error("Failed to retrieve signature from Circle API.");
-    }
-
-    return signature as `0x${string}`;
-  } catch (error: any) {
-    console.error("Circle signTypedData error:", error?.response?.data || error);
-    console.error("Data that failed:", finalData);
-    throw error;
-  }
-}
-
-interface ChallengeResponse {
-  id: string;
-}
-
-async function waitForTransactionConfirmation(challengeId: string) {
-  while (true) {
-    const response = await circleDeveloperSdk.getTransaction({ id: challengeId });
-    const tx = response.data?.transaction;
-
-    if (tx?.state === "CONFIRMED" || tx?.state === "COMPLETE") {
-      console.log(`Transaction ${challengeId} reached terminal state '${tx.state}' with hash: ${tx.txHash}`);
-      if (!tx.txHash) {
-        throw new Error(`Transaction ${challengeId} is ${tx.state} but txHash is missing.`);
-      }
-      return tx;
-    } else if (tx?.state === "FAILED") {
-      console.error("Circle API Error:", tx);
-      throw new Error(`Transaction ${challengeId} failed with reason: ${tx.errorReason}`);
-    }
-
-    console.log(`Transaction ${challengeId} state: ${tx?.state}. Polling again in 2s...`);
-    await new Promise(resolve => setTimeout(resolve, 2000));
-  }
-}
-
 interface WalletBalance {
   walletId: string;
   address: string;
@@ -238,15 +73,8 @@ interface WalletBalance {
   balance: bigint;
 }
 
-export async function POST(req: NextRequest) {
+export const POST = withAuth(async (req, { user, supabase }) => {
   try {
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-
-    if (!user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
     const body = await req.json();
     const { 
       recipientAddress, 
@@ -350,124 +178,280 @@ export async function POST(req: NextRequest) {
 
       console.log(`User selected wallet: ${sourceWallet.walletId} on ${sourceWallet.chain}`);
     } else if (sourceType === "gateway") {
-      // User wants to use Gateway balance specifically
-      // Check Gateway balance for ALL wallet addresses (both SCA and EOA)
-      // Any wallet can deposit to Gateway, but we need an EOA to sign the burn intent
-      
-      // First, ensure we have an EOA signer for signing burn intents
-      const { data: eoaWallets, error: eoaError } = await supabase
-        .from("wallets")
-        .select("*")
-        .eq("user_id", user.id)
-        .eq("type", "gateway_signer");
+      const destinationBlockchain = CHAIN_TO_BLOCKCHAIN[destinationChain];
+      const destinationAppKitChain =
+        APP_KIT_CHAIN_BY_BLOCKCHAIN[destinationBlockchain];
 
-      if (eoaError || !eoaWallets || eoaWallets.length === 0) {
+      // #region agent log
+      fetch('http://127.0.0.1:7276/ingest/b6916372-e6aa-4804-b60b-f6f109736944',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'3365f4'},body:JSON.stringify({sessionId:'3365f4',runId:'pre-fix-1',hypothesisId:'H3',location:'app/api/payout/route.ts:178',message:'Gateway payout chain mapping',data:{requestedDestinationChain:destinationChain,destinationBlockchain,destinationAppKitChain:destinationAppKitChain ?? null},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
+
+      if (!destinationAppKitChain) {
         return NextResponse.json(
-          { error: "No Gateway EOA signers found. Please create Gateway signer wallets first." },
-          { status: 404 }
+          { error: `Unsupported destination chain: ${destinationChain}` },
+          { status: 400 }
         );
       }
 
-      // Check Gateway balance for ALL user wallet addresses (SCA wallets can deposit too!)
-      // We'll check all wallets to find which has deposited to Gateway
-      
-      let bestSourceChain: SupportedChain | undefined;
-      let maxBalanceOnSingleChain = BigInt(0);
-      let selectedChainFee = 0;
+      const nonGatewaySignerAddresses = new Set(
+        wallets
+          .filter((wallet) => wallet.type !== "gateway_signer")
+          .map((wallet) => wallet.address?.toLowerCase())
+          .filter(
+            (value): value is string =>
+              typeof value === "string" && value.length > 0
+          )
+      );
 
-      // Get unique wallet addresses from ALL wallets (not just EOAs)
-      const uniqueAddresses = Array.from(new Set(wallets.map(w => w.address.toLowerCase())));
-      console.log(`Checking Gateway balance for ${uniqueAddresses.length} unique wallet address(es)`);
-      
-      // Check each unique address's Gateway balance
-      for (const addressStr of uniqueAddresses) {
-        const walletAddress = addressStr as Address;
-        
-        try {
-          console.log(`Checking Gateway balance for wallet ${walletAddress}`);
-          const gatewayBalance = await fetchGatewayBalance(walletAddress);
-          
-          if (gatewayBalance.balances && Array.isArray(gatewayBalance.balances)) {
-            // Check each domain for this EOA
-            for (const bal of gatewayBalance.balances) {
-              const balanceNum = parseFloat(bal.balance);
-              const balanceInAtomicUnits = BigInt(Math.floor(balanceNum * 1_000_000));
-              
-              // Map domain to chain
-              const { CHAIN_BY_DOMAIN } = await import("@/lib/circle/gateway-sdk");
-              const chainName = CHAIN_BY_DOMAIN[bal.domain];
-              const chain = chainName as SupportedChain;
-              
-              const chainFee = GATEWAY_FEES[chain] || 2.01;
-              const requiredWithFee = amountInAtomicUnits + BigInt(Math.floor(chainFee * 1_000_000));
-              
-              console.log(`  Gateway balance on ${chain}: ${balanceNum} USDC (fee: $${chainFee}, required: $${Number(requiredWithFee) / 1_000_000})`);
-              
-              // Prefer chain with sufficient balance, or track the one with most balance
-              if (balanceInAtomicUnits >= requiredWithFee && balanceInAtomicUnits > maxBalanceOnSingleChain) {
-                maxBalanceOnSingleChain = balanceInAtomicUnits;
-                bestSourceChain = chain;
-                selectedChainFee = chainFee;
-                depositorWallet = wallets.find(w => 
-                  w.address.toLowerCase() === walletAddress.toLowerCase()
-                );
-              } else if (!bestSourceChain && balanceInAtomicUnits > maxBalanceOnSingleChain) {
-                // Track chain with most balance even if insufficient
-                maxBalanceOnSingleChain = balanceInAtomicUnits;
-                bestSourceChain = chain;
-                selectedChainFee = chainFee;
-                depositorWallet = wallets.find(w => 
-                  w.address.toLowerCase() === walletAddress.toLowerCase()
-                );
-              }
-            }
-          }
-        } catch (error) {
-          console.error(`  Error checking Gateway balance for ${walletAddress}:`, error);
-        }
-      }
-
-      if (!depositorWallet || !bestSourceChain) {
+      if (nonGatewaySignerAddresses.size === 0) {
         return NextResponse.json(
-          { 
+          {
             error: "No Gateway balance found",
-            userMessage: `No Gateway balance available across your wallets. Please deposit USDC to Gateway from any of your wallets first.`
+            userMessage:
+              "No eligible non-signer wallets were found for this account.",
           },
-          { status: 400 }
-        );
-      }
-
-      const requiredWithFee = amountInAtomicUnits + BigInt(Math.floor(selectedChainFee * 1_000_000));
-      if (maxBalanceOnSingleChain < requiredWithFee) {
-        const totalAvailable = Number(maxBalanceOnSingleChain) / 1_000_000;
-        const totalRequired = Number(requiredWithFee) / 1_000_000;
-        return NextResponse.json(
-          { 
-            error: "Insufficient Gateway balance on single chain",
-            userMessage: `Need ${totalRequired.toFixed(2)} USDC on ${CHAIN_LABELS[bestSourceChain]} (${amountNum} + $${selectedChainFee} fee). Available: ${totalAvailable.toFixed(2)} USDC. Gateway balances are per-chain and cannot be combined.`
-          },
-          { status: 400 }
-        );
-      }
-
-      // Use any Circle wallet for minting (doesn't need balance), but EOA will sign
-      sourceWallet = walletBalances.length > 0 ? walletBalances[0] : undefined;
-      
-      if (!sourceWallet) {
-        return NextResponse.json(
-          { error: "No wallets found" },
           { status: 404 }
         );
       }
 
-      // Set the source chain to where the Gateway balance actually is
-      sourceWallet.chain = bestSourceChain;
+      const gatewaySignerAddresses = Array.from(
+        new Set(
+          wallets
+            .filter((wallet) => wallet.type === "gateway_signer")
+            .map((wallet) => wallet.address?.toLowerCase())
+            .filter(
+              (value): value is string =>
+                typeof value === "string" && value.length > 0
+            )
+        )
+      );
 
-      useGateway = true;
-      strategy = "gateway";
-      estimatedFee = selectedChainFee; // Use actual chain fee
-      estimatedTime = 60;
-      console.log(`User selected Gateway balance. Total: ${Number(maxBalanceOnSingleChain) / 1_000_000} USDC from depositor ${depositorWallet.address} on ${bestSourceChain}`);
+      if (gatewaySignerAddresses.length === 0) {
+        return NextResponse.json(
+          {
+            error: "No Gateway signer wallet found",
+            userMessage:
+              "Create a Gateway signer wallet before spending Gateway balance.",
+          },
+          { status: 404 }
+        );
+      }
+
+      // #region agent log
+      fetch('http://127.0.0.1:7276/ingest/b6916372-e6aa-4804-b60b-f6f109736944',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'3365f4'},body:JSON.stringify({sessionId:'3365f4',runId:'pre-fix-2',hypothesisId:'H5',location:'app/api/payout/route.ts:230',message:'Gateway signer/depositor split',data:{gatewaySignerAddressCount:gatewaySignerAddresses.length,selectedSignerAddress:`${gatewaySignerAddresses[0].slice(0,6)}...${gatewaySignerAddresses[0].slice(-4)}`,nonSignerAddressCount:nonGatewaySignerAddresses.size},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
+
+      const { data: gatewayDeposits, error: gatewayDepositsError } =
+        await supabase
+          .from("transactions")
+          .select("sender_address, recipient_address")
+          .eq("user_id", user.id)
+          .eq("type", "OUTBOUND")
+          .in("recipient_address", [
+            GATEWAY_WALLET_ADDRESS,
+            GATEWAY_WALLET_ADDRESS.toLowerCase(),
+          ]);
+
+      if (gatewayDepositsError) {
+        console.error("Failed to query Gateway deposit history:", gatewayDepositsError);
+        return NextResponse.json(
+          { error: "Failed to load Gateway deposit history" },
+          { status: 500 }
+        );
+      }
+
+      const uniqueAddresses = Array.from(
+        new Set(
+          (gatewayDeposits ?? [])
+            .map((tx) => tx.sender_address?.toLowerCase())
+            .filter(
+              (value): value is string =>
+                typeof value === "string" &&
+                value.length > 0 &&
+                nonGatewaySignerAddresses.has(value)
+            )
+        )
+      );
+
+      // #region agent log
+      fetch('http://127.0.0.1:7276/ingest/b6916372-e6aa-4804-b60b-f6f109736944',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'3365f4'},body:JSON.stringify({sessionId:'3365f4',runId:'pre-fix-1',hypothesisId:'H1',location:'app/api/payout/route.ts:239',message:'Gateway payout source address candidates',data:{walletCount:wallets.length,gatewaySignerWalletCount:wallets.filter((wallet)=>wallet.type==='gateway_signer').length,nonGatewaySignerAddressCount:nonGatewaySignerAddresses.size,gatewayDepositRowCount:(gatewayDeposits ?? []).length,uniqueAddressCount:uniqueAddresses.length,uniqueAddressPreview:uniqueAddresses.slice(0,3).map((address)=>`${address.slice(0,6)}...${address.slice(-4)}`)},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
+
+      if (uniqueAddresses.length === 0) {
+        return NextResponse.json(
+          {
+            error: "No Gateway balance found",
+            userMessage:
+              "No eligible wallet addresses were found for this account.",
+          },
+          { status: 404 }
+        );
+      }
+
+      try {
+        const probeSources = [
+          ...uniqueAddresses.map((address) => ({ address })),
+          { address: gatewaySignerAddresses[0] },
+        ];
+        const balanceProbe = await getAppKit().unifiedBalance.getBalances({
+          token: "USDC",
+          sources: probeSources,
+          networkType: "testnet",
+          includePending: true,
+        });
+
+        const allocationPlan = planUnifiedBalanceGatewayAllocations(
+          balanceProbe.breakdown,
+          uniqueAddresses,
+          amountNum.toString()
+        );
+
+        if (!allocationPlan.isSufficient || allocationPlan.allocations.length === 0) {
+          return NextResponse.json(
+            {
+              error: "Insufficient Gateway balance",
+              userMessage:
+                `Not enough confirmed Gateway balance. ` +
+                `Available: ${allocationPlan.availableAmount} USDC, ` +
+                `Required: ${allocationPlan.requiredAmount} USDC, ` +
+                `Shortfall: ${allocationPlan.shortfallAmount} USDC.`,
+            },
+            { status: 400 }
+          );
+        }
+
+        const fromSources = buildUnifiedBalanceGatewayAllocatedSources(
+          allocationPlan.allocations,
+          createCircleWalletsAdapterInstance,
+          gatewaySignerAddresses[0]
+        );
+
+        if (fromSources.length === 0) {
+          return NextResponse.json(
+            {
+              error: "Gateway allocation failed",
+              userMessage:
+                "Unable to build a valid Gateway spend payload with explicit allocations.",
+            },
+            { status: 500 }
+          );
+        }
+
+        const delegateTargets = new Map<
+          string,
+          { sourceAccount: string; chain: AppKitChain }
+        >();
+
+        for (const allocation of allocationPlan.allocations) {
+          const targetKey = `${allocation.sourceAccount}|${allocation.chain}`;
+          if (!delegateTargets.has(targetKey)) {
+            delegateTargets.set(targetKey, {
+              sourceAccount: allocation.sourceAccount,
+              chain: allocation.chain,
+            });
+          }
+        }
+
+        for (const target of delegateTargets.values()) {
+          await getAppKit().unifiedBalance.addDelegate({
+            from: {
+              adapter: createCircleWalletsAdapterInstance(),
+              address: target.sourceAccount,
+              chain: target.chain,
+            },
+            delegateAddress: gatewaySignerAddresses[0],
+            token: "USDC",
+          });
+        }
+
+        await getAppKit().unifiedBalance.estimateSpend({
+          amount: amountNum.toString(),
+          token: "USDC",
+          from: fromSources,
+          to: {
+            chain: destinationAppKitChain,
+            recipientAddress,
+            useForwarder: true,
+          },
+        });
+
+        console.log(fromSources)
+        console.log(destinationAppKitChain)
+
+        const spendResult = await getAppKit().unifiedBalance.spend({
+          amount: amountNum.toString(),
+          token: "USDC",
+          from: fromSources,
+          to: {
+            chain: destinationAppKitChain,
+            recipientAddress,
+            useForwarder: true,
+          },
+        });
+
+        const normalized = normalizeUnifiedBalanceGatewaySpendResult(
+          spendResult,
+          destinationChain
+        );
+
+        await supabase.from("transactions").insert([
+          {
+            user_id: user.id,
+            amount: amountNum,
+            sender_address: normalized.senderAddress ?? uniqueAddresses[0],
+            recipient_address: recipientAddress,
+            tx_hash: normalized.txHash ?? null,
+            circle_transaction_id: normalized.txId,
+            blockchain: destinationBlockchain,
+            type: "OUTBOUND",
+            status: "PENDING",
+          },
+        ]);
+
+        return NextResponse.json({
+          success: true,
+          txId: normalized.txId,
+          txHash: normalized.txHash,
+          routing: {
+            strategy: "gateway",
+            sourceChain: normalized.sourceChain,
+            destinationChain,
+            automaticallySelected: true,
+          },
+          settlement: {
+            estimatedTimeSeconds: 60,
+            estimatedTimeFriendly: "~1 minute",
+            estimatedFeeUSDC: normalized.estimatedFeeUSDC,
+            guaranteed: false,
+          },
+        });
+      } catch (error) {
+        const err = error as {
+          code?: unknown;
+          type?: unknown;
+          message?: unknown;
+          shortMessage?: unknown;
+          details?: unknown;
+          cause?: {
+            code?: unknown;
+            status?: unknown;
+            method?: unknown;
+            url?: unknown;
+          };
+        };
+        // #region agent log
+        fetch('http://127.0.0.1:7276/ingest/b6916372-e6aa-4804-b60b-f6f109736944',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'3365f4'},body:JSON.stringify({sessionId:'3365f4',runId:'pre-fix-1',hypothesisId:'H4',location:'app/api/payout/route.ts:329',message:'Gateway spend error details',data:{code:err?.code ?? null,type:err?.type ?? null,message:typeof err?.message==='string' ? err.message : String(err?.message ?? ''),shortMessage:typeof err?.shortMessage==='string' ? err.shortMessage : null,details:typeof err?.details==='string' ? err.details : null,causeCode:err?.cause?.code ?? null,causeStatus:err?.cause?.status ?? null,causeMethod:typeof err?.cause?.method === 'string' ? err.cause.method : null,causeUrl:typeof err?.cause?.url === 'string' ? err.cause.url : null},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
+        console.error("Gateway payout via unifiedBalance.spend failed:", error);
+        const mappedError = getUnifiedBalancePayoutError(error);
+        return NextResponse.json(
+          {
+            error: mappedError.error,
+            userMessage: mappedError.userMessage,
+          },
+          { status: mappedError.status }
+        );
+      }
     } else {
       // Auto mode: Try same-chain first (optimal)
       sourceWallet = walletBalances.find(
@@ -735,27 +719,35 @@ export async function POST(req: NextRequest) {
       txHash = mintTx.txHash as string;
       console.log(`Gateway transfer completed. Mint TX: ${txHash}`);
     } else {
-      // Same-chain transfer using direct USDC transfer
-      const usdcContractAddress = CHAIN_TO_USDC_ADDRESS[sourceWallet.blockchain];
-      if (!usdcContractAddress) {
+      try {
+        const sameChainSendResult = await sendUsdcOnSameChainWithAppKit({
+          sourceBlockchain: sourceWallet.blockchain,
+          sourceWalletAddress: sourceWallet.address,
+          recipientAddress,
+          amount: amountNum.toString(),
+        });
+
+        txId = sameChainSendResult.txId;
+        txHash = sameChainSendResult.txHash;
+
+        if (sameChainSendResult.estimatedFee) {
+          const parsedEstimatedFee = Number.parseFloat(
+            sameChainSendResult.estimatedFee
+          );
+          if (Number.isFinite(parsedEstimatedFee)) {
+            estimatedFee = parsedEstimatedFee;
+          }
+        }
+      } catch (error) {
+        const mappedError = getAppKitSendError(error);
         return NextResponse.json(
-          { error: `USDC contract not found for ${sourceWallet.blockchain}` },
-          { status: 400 }
+          {
+            error: mappedError.error,
+            userMessage: mappedError.userMessage,
+          },
+          { status: mappedError.status }
         );
       }
-
-      const response = await circleDeveloperSdk.createContractExecutionTransaction({
-        walletId: sourceWallet.walletId,
-        contractAddress: usdcContractAddress,
-        abiFunctionSignature: "transfer(address,uint256)",
-        abiParameters: [recipientAddress, amountInAtomicUnits.toString()],
-        fee: { type: "level", config: { feeLevel: "HIGH" } },
-      });
-
-      if (!response.data?.id) {
-        throw new Error("Failed to initiate transfer");
-      }
-      txId = response.data.id;
     }
 
     // Log transaction
@@ -794,13 +786,29 @@ export async function POST(req: NextRequest) {
 
   } catch (error: any) {
     console.error("Payout error:", error);
-    
+
+    // If we hit our polling ceiling, the underlying transfer is still in flight
+    // upstream (Circle / Gateway). Surface a 202 so the client can poll for
+    // completion via /api/bridge/monitor or refresh, instead of a misleading 500.
+    if (error instanceof PollingTimeoutError) {
+      return NextResponse.json(
+        {
+          success: false,
+          status: "pending",
+          txId: error.challengeId,
+          message:
+            "Transfer accepted but did not finalize within the request window. It may still complete; check transaction status.",
+        },
+        { status: 202 }
+      );
+    }
+
     let errorMessage = "Internal server error";
     let userFriendlyMessage = "";
-    
+
     if (error.message) {
       errorMessage = error.message;
-      
+
       // Provide user-friendly messages for common errors
       if (errorMessage.includes("Insufficient native token")) {
         userFriendlyMessage = "The source wallet needs native tokens (gas) to pay for transaction fees. Please add native tokens to your wallet.";
@@ -812,13 +820,13 @@ export async function POST(req: NextRequest) {
         errorMessage = error.response.data.message;
       }
     }
-    
+
     return NextResponse.json(
-      { 
+      {
         error: errorMessage,
-        userMessage: userFriendlyMessage || errorMessage
+        userMessage: userFriendlyMessage || errorMessage,
       },
       { status: 500 }
     );
   }
-}
+});

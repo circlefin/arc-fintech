@@ -113,21 +113,16 @@ export function NewWalletDialog({
       const { data: { user } } = await supabase.auth.getUser()
       if (!user) throw new Error("User not authenticated")
 
-      // Create Wallet Set
-      const setResponse = await fetch("/api/wallet-set", {
-        method: "POST",
-        body: JSON.stringify({ entityName: values.name }),
-      })
-
-      if (!setResponse.ok) throw new Error("Failed to create wallet set")
-      const walletSet = await setResponse.json()
-
-      // Create Wallet
+      // The server now derives (or reuses) the Circle wallet set itself, so
+      // the client only sends the chain and a display name. Sending the
+      // walletSetId from the client was unsafe (one user could nominate
+      // another user's set) and also caused us to spawn a fresh wallet set
+      // on every wallet creation.
       const walletResponse = await fetch("/api/wallet", {
         method: "POST",
         body: JSON.stringify({
-          walletSetId: walletSet.id,
-          blockchain: values.chain
+          name: values.name,
+          blockchain: values.chain,
         }),
       })
 

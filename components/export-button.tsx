@@ -28,28 +28,31 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { toast } from "sonner"
+import { shortenAddress } from "@/lib/utils/data-formatters"
+import type { FullTransaction, FullWallet } from "@/lib/balances/types"
+
+type ExportRow = FullWallet | FullTransaction
 
 interface ExportButtonProps {
-  data: any[]
+  data: ExportRow[]
   filename: string
   type: "transactions" | "wallets"
   className?: string
 }
 
-export function ExportButton({ data, filename, type, className }: ExportButtonProps) {
-  const formatTimestamp = (dateString: string) => {
-    return new Date(dateString).toISOString()
-  }
+function isTransaction(row: ExportRow): row is FullTransaction {
+  return "sender_address" in row
+}
 
-  const shortenAddress = (address: string) => {
-    if (!address) return ""
-    if (address.length < 10) return address
-    return `${address.slice(0, 6)}...${address.slice(-5)}`
+export function ExportButton({ data, filename, type, className }: ExportButtonProps) {
+  const formatTimestamp = (dateString: string | null | undefined) => {
+    if (!dateString) return ""
+    return new Date(dateString).toISOString()
   }
 
   const prepareDataForExport = () => {
     if (type === "transactions") {
-      return data.map(tx => ({
+      return data.filter(isTransaction).map((tx) => ({
         ID: tx.id,
         Amount: tx.amount || 0,
         Currency: "USD",
@@ -63,17 +66,19 @@ export function ExportButton({ data, filename, type, className }: ExportButtonPr
         "Updated At": formatTimestamp(tx.updated_at),
       }))
     } else {
-      return data.map(wallet => ({
-        ID: wallet.id,
-        Name: wallet.name || "",
-        Address: wallet.address || "",
-        "Short Address": shortenAddress(wallet.address || ""),
-        Type: wallet.type || "",
-        Blockchain: wallet.blockchain || "",
-        "Circle Wallet ID": wallet.circle_wallet_id || "",
-        "Created At": formatTimestamp(wallet.created_at),
-        "Updated At": formatTimestamp(wallet.updated_at),
-      }))
+      return data
+        .filter((row): row is FullWallet => !isTransaction(row))
+        .map((wallet) => ({
+          ID: wallet.id,
+          Name: wallet.name || "",
+          Address: wallet.address || "",
+          "Short Address": shortenAddress(wallet.address || ""),
+          Type: wallet.type || "",
+          Blockchain: wallet.blockchain || "",
+          "Circle Wallet ID": wallet.circle_wallet_id || "",
+          "Created At": formatTimestamp(wallet.created_at),
+          "Updated At": formatTimestamp(wallet.updated_at),
+        }))
     }
   }
 
@@ -173,7 +178,7 @@ export function ExportButton({ data, filename, type, className }: ExportButtonPr
 
 // Utility function for bulk export operations
 export function exportMultipleData(
-  datasets: { data: any[]; filename: string; type: "transactions" | "wallets" }[]
+  datasets: { data: ExportRow[]; filename: string; type: "transactions" | "wallets" }[]
 ) {
   datasets.forEach(({ data, filename, type }) => {
     const exportButton = { data, filename, type }

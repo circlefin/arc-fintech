@@ -103,10 +103,12 @@ export function mapComplianceResult(
 }
 
 /**
- * Determine if a transfer should be blocked based on compliance result
+ * Determine if a transfer should be blocked based on compliance result.
+ * ERROR is treated as blocking because we cannot vouch for an address whose
+ * screening request failed to complete.
  */
 export function shouldBlockTransfer(result: ComplianceResult): boolean {
-  return result === 'FAIL';
+  return result === 'FAIL' || result === 'ERROR';
 }
 
 /**
@@ -123,6 +125,8 @@ export function formatComplianceResponse(
     message = 'This address has been flagged and transactions are blocked.';
   } else if (result === 'REVIEW') {
     message = 'This address requires manual review before proceeding.';
+  } else if (result === 'ERROR') {
+    message = 'Compliance screening is currently unavailable. Try again shortly.';
   } else {
     message = 'This address has passed compliance screening.';
   }
@@ -155,6 +159,8 @@ export function getComplianceResultLabel(result: ComplianceResult): string {
       return 'Requires Review';
     case 'FAIL':
       return 'Blocked';
+    case 'ERROR':
+      return 'Screening Unavailable';
     default:
       return 'Unknown';
   }

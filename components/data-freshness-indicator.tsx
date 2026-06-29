@@ -41,19 +41,24 @@ export function DataFreshnessIndicator({
   onRefresh,
   className = ""
 }: DataFreshnessIndicatorProps) {
+  // Both pieces of state derive from `Date.now()`, which Next.js 16 forbids
+  // during client render. Compute them in the 30s interval effect instead.
   const [timeAgo, setTimeAgo] = React.useState("")
+  const [freshnessColor, setFreshnessColor] = React.useState("bg-gray-500")
 
   React.useEffect(() => {
     if (!lastUpdated) {
       setTimeAgo("Syncing...")
+      setFreshnessColor("bg-gray-500")
       return
     }
 
-    const updateTimeAgo = () => {
+    const tick = () => {
       const now = new Date()
       const updated = new Date(lastUpdated)
-      const diffMs = now.getTime() - updated.getTime()
-      const diffMins = Math.floor(diffMs / (1000 * 60))
+      const diffMins = Math.floor(
+        (now.getTime() - updated.getTime()) / (1000 * 60)
+      )
 
       if (diffMins < 1) {
         setTimeAgo("Just now")
@@ -66,31 +71,23 @@ export function DataFreshnessIndicator({
         const days = Math.floor(diffMins / 1440)
         setTimeAgo(`${days}d ago`)
       }
+
+      if (diffMins < 5) setFreshnessColor("bg-green-500")
+      else if (diffMins < 30) setFreshnessColor("bg-yellow-500")
+      else setFreshnessColor("bg-red-500")
     }
 
-    updateTimeAgo()
-    const interval = setInterval(updateTimeAgo, 30000) // Update every 30 seconds
+    tick()
+    const interval = setInterval(tick, 30000)
 
     return () => clearInterval(interval)
   }, [lastUpdated])
-
-  const getFreshnessColor = () => {
-    if (!lastUpdated) return "bg-gray-500"
-    
-    const now = new Date()
-    const updated = new Date(lastUpdated)
-    const diffMins = Math.floor((now.getTime() - updated.getTime()) / (1000 * 60))
-
-    if (diffMins < 5) return "bg-green-500"
-    if (diffMins < 30) return "bg-yellow-500"
-    return "bg-red-500"
-  }
 
   return (
     <TooltipProvider>
       <div className={`flex items-center gap-2 ${className}`}>
         <div className="flex items-center gap-1">
-          <div className={`w-2 h-2 rounded-full ${getFreshnessColor()}`} />
+          <div className={`w-2 h-2 rounded-full ${freshnessColor}`} />
           <span className="text-xs text-muted-foreground flex items-center gap-1">
             <IconClock className="size-3" />
             {timeAgo}

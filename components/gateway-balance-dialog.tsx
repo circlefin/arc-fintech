@@ -18,7 +18,7 @@
 
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState } from "react"
 import { IconInfoCircle } from "@tabler/icons-react"
 import {
   Dialog,
@@ -31,94 +31,42 @@ import {
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Separator } from "@/components/ui/separator"
-import { createClient } from "@/lib/supabase/client"
+import { useBalanceContext } from "@/lib/contexts/balance-context"
+import type { ChainBalances } from "@/lib/balances/types"
 
-// Mapping API chain keys to Display labels
-const CHAIN_LABELS: Record<string, string> = {
-  "ethSepolia": "Ethereum Sepolia",
-  "baseSepolia": "Base Sepolia",
-  "avalancheFuji": "Avalanche Fuji",
-  "arcTestnet": "Arc Testnet",
+const CHAIN_LABELS: Record<keyof ChainBalances, string> = {
+  ethSepolia: "Ethereum Sepolia",
+  baseSepolia: "Base Sepolia",
+  avalancheFuji: "Avalanche Fuji",
+  arcTestnet: "Arc Testnet",
 }
+
+const CHAIN_ORDER: Array<keyof ChainBalances> = [
+  "ethSepolia",
+  "baseSepolia",
+  "avalancheFuji",
+  "arcTestnet",
+]
+
+const formatUsdc = (n: number) =>
+  `$${n.toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`
 
 export function GatewayBalanceDialog() {
   const [open, setOpen] = useState(false)
-  const [loading, setLoading] = useState(true)
-  const [chainBalances, setChainBalances] = useState<Record<string, number>>({})
-  const [totalBalance, setTotalBalance] = useState<number>(0)
+  const {
+    gatewayChainBalances,
+    gatewayPendingChainBalances,
+    gatewayTotal,
+    gatewayPending,
+    isLoadingGateway,
+  } = useBalanceContext()
 
-  const supabase = createClient()
-
-  useEffect(() => {
-    if (open) {
-      fetchGatewayBreakdown()
-    }
-  }, [open])
-
-  const fetchGatewayBreakdown = async () => {
-    setLoading(true)
-    try {
-      const { data: { user } } = await supabase.auth.getUser()
-      if (!user) return
-
-      // 1. Get all wallet addresses to query the gateway
-      const { data: wallets, error } = await supabase
-        .from("wallets")
-        .select("address")
-        .eq("user_id", user.id)
-
-      if (error || !wallets || wallets.length === 0) {
-        setLoading(false)
-        return
-      }
-
-      const addresses = wallets.map((w) => w.address)
-
-      // 2. Fetch Gateway Balances
-      const res = await fetch("/api/gateway/balance", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ addresses }),
-      })
-
-      if (!res.ok) throw new Error("Failed to fetch balances")
-
-      const data = await res.json()
-
-      // 3. Aggregate balances by chain
-      // Initialize with 0 for supported chains
-      const totals: Record<string, number> = {
-        "ethSepolia": 0,
-        "baseSepolia": 0,
-        "avalancheFuji": 0,
-        "arcTestnet": 0,
-      }
-
-      let grandTotal = 0
-
-      if (data.balances && Array.isArray(data.balances)) {
-        data.balances.forEach((walletResult: any) => {
-          if (walletResult.gatewayBalances && Array.isArray(walletResult.gatewayBalances)) {
-            walletResult.gatewayBalances.forEach((gb: any) => {
-              // gb.chain is the API key (e.g., "baseSepolia")
-              if (totals[gb.chain] !== undefined) {
-                totals[gb.chain] += gb.balance
-                grandTotal += gb.balance
-              }
-            })
-          }
-        })
-      }
-
-      setChainBalances(totals)
-      setTotalBalance(grandTotal)
-
-    } catch (error) {
-      console.error("Error fetching gateway breakdown:", error)
-    } finally {
-      setLoading(false)
-    }
-  }
+  const hasAnyPending =
+    gatewayPending > 0 ||
+    CHAIN_ORDER.some((key) => gatewayPendingChainBalances[key] > 0)
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -132,44 +80,74 @@ export function GatewayBalanceDialog() {
           <span className="sr-only">Gateway Balance Info</span>
         </Button>
       </DialogTrigger>
-      <DialogContent className="sm:max-w-[400px]">
+      <DialogContent className="sm:max-w-[440px]">
         <DialogHeader>
           <DialogTitle>Gateway Balance</DialogTitle>
           <DialogDescription>
-            Breakdown of USDC held in Gateway contracts across supported chains.
+            Breakdown of USDC held in Gateway across supported chains. Pending
+            shows recent deposits that haven&apos;t yet finalized into the
+            confirmed Gateway balance.
           </DialogDescription>
         </DialogHeader>
 
         <div className="grid gap-4 py-4">
-          {/* Total Header */}
           <div className="flex flex-col items-center justify-center p-4 bg-muted/50 rounded-lg">
             <span className="text-sm text-muted-foreground">Total Available</span>
-            {loading ? (
+            {isLoadingGateway ? (
               <Skeleton className="h-8 w-32 mt-1" />
             ) : (
               <span className="text-3xl font-bold tracking-tight">
-                ${totalBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                {formatUsdc(gatewayTotal)}
               </span>
             )}
+            {!isLoadingGateway && gatewayPending > 0 ? (
+              <span className="mt-1 text-xs text-amber-600 dark:text-amber-400">
+                +{formatUsdc(gatewayPending)} pending
+              </span>
+            ) : null}
           </div>
 
           <Separator />
 
-          {/* Chain List */}
-          <div className="space-y-3">
-            {Object.entries(CHAIN_LABELS).map(([apiKey, label]) => {
-              const balance = chainBalances[apiKey] || 0
+          <div className="grid grid-cols-[1fr_auto_auto] gap-x-4 gap-y-2 text-sm items-center">
+            <span className="text-xs uppercase tracking-wide text-muted-foreground">
+              Chain
+            </span>
+            <span className="text-xs uppercase tracking-wide text-muted-foreground text-right">
+              Confirmed
+            </span>
+            <span className="text-xs uppercase tracking-wide text-muted-foreground text-right">
+              {hasAnyPending ? "Pending" : ""}
+            </span>
 
+            {CHAIN_ORDER.map((key) => {
+              const confirmed = gatewayChainBalances[key] ?? 0
+              const pending = gatewayPendingChainBalances[key] ?? 0
               return (
-                <div key={apiKey} className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium">{label}</span>
-                  </div>
-                  {loading ? (
-                    <Skeleton className="h-4 w-16" />
+                <div
+                  key={key}
+                  className="contents"
+                >
+                  <span className="font-medium">{CHAIN_LABELS[key]}</span>
+                  {isLoadingGateway ? (
+                    <Skeleton className="h-4 w-16 justify-self-end" />
                   ) : (
-                    <span className="text-sm font-mono text-muted-foreground">
-                      ${balance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    <span className="font-mono text-muted-foreground text-right">
+                      {formatUsdc(confirmed)}
+                    </span>
+                  )}
+                  {isLoadingGateway ? (
+                    <Skeleton className="h-4 w-16 justify-self-end" />
+                  ) : (
+                    <span
+                      className={
+                        "font-mono text-right " +
+                        (pending > 0
+                          ? "text-amber-600 dark:text-amber-400"
+                          : "text-muted-foreground/50")
+                      }
+                    >
+                      {pending > 0 ? `+${formatUsdc(pending)}` : "—"}
                     </span>
                   )}
                 </div>

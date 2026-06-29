@@ -80,7 +80,7 @@ Modern multi-chain treasury management system. This sample application uses Next
 
 - Built with [Next.js](https://nextjs.org/) App Router and [Supabase](https://supabase.com/)
 - Uses [Circle Developer Controlled Wallets](https://developers.circle.com/wallets/dev-controlled) for managing multi-chain transactions
-- Utilizes `@circle-fin/bridge-kit` for bridging assets across supported chains
+- Utilizes `@circle-fin/app-kit` (`kit.bridge` / `kit.estimateBridge`) for bridging assets across supported chains
 - Real-time UI updates powered by Supabase Realtime subscriptions
 - Styled with [Tailwind CSS](https://tailwindcss.com) and components from [shadcn/ui](https://ui.shadcn.com/)
 

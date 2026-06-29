@@ -16,6 +16,40 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { BLOCK_EXPLORERS } from "@/lib/constants/block-explorers"
+
+/**
+ * Build a block explorer URL for a given chain. Falls back to Etherscan
+ * Sepolia (the most common testnet here) when an unknown blockchain is
+ * supplied, instead of returning a broken `#` link.
+ *
+ * `kind` switches between viewing an address page or a transaction page.
+ */
+export function getExplorerUrl(
+  blockchain: string | null | undefined,
+  hashOrAddress: string,
+  kind: "address" | "tx" = "address"
+): string {
+  const base = (blockchain && BLOCK_EXPLORERS[blockchain]) || BLOCK_EXPLORERS["ETH-SEPOLIA"]
+  return `${base}/${kind}/${hashOrAddress}`
+}
+
+/**
+ * Format a USDC amount (in display units, not atomic) as `$1,234.56`.
+ * Use this anywhere the UI shows balances or transaction amounts so we
+ * don't drift between `toFixed(2)` and Intl formatting.
+ */
+export function formatUsdc(amount: number | string): string {
+  const n = typeof amount === "string" ? Number(amount) : amount
+  if (!Number.isFinite(n)) return "$0.00"
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(n)
+}
+
 // Utility to create wallet/transaction details for search results
 export interface WalletDetails {
   id: string

@@ -16,8 +16,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { NextResponse } from "next/server";
+import { withAuth } from "@/lib/api/with-auth";
 
 /**
  * Monitor endpoint to check the status of bridge transfers
@@ -28,17 +28,8 @@ import { createClient } from "@/lib/supabase/server";
  * 
  * This endpoint just checks the current status from our database
  */
-export async function GET(request: NextRequest) {
+export const GET = withAuth(async (request, { user, supabase }) => {
   try {
-    const supabase = await createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-
-    if (!user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
     const searchParams = request.nextUrl.searchParams;
     const txHash = searchParams.get("txHash");
 
@@ -100,4 +91,4 @@ export async function GET(request: NextRequest) {
       { status: 500 }
     );
   }
-}
+});

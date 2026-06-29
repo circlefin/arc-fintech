@@ -16,71 +16,49 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { NextRequest, NextResponse } from "next/server";
-import { BridgeKit } from "@circle-fin/bridge-kit";
-import { createCircleWalletsAdapter } from "@circle-fin/adapter-circle-wallets";
-import { circleDeveloperSdk } from "@/lib/circle/developer-controlled-wallets-client";
-import { createClient } from "@/lib/supabase/server";
-import { fetchGatewayBalance, type SupportedChain } from "@/lib/circle/gateway-sdk";
+import { NextResponse } from "next/server";
+import { z } from "zod";
+import { getAppKit, getCircleWalletsAdapter } from "@/lib/circle/app-kit";
+import { fetchGatewayBalance } from "@/lib/circle/gateway-sdk";
+import { assertWalletsOwnedByUser } from "@/lib/api/ownership";
+import { validateJsonBody, blockchainSchema } from "@/lib/api/validate";
+import { withAuth } from "@/lib/api/with-auth";
+import {
+  APP_KIT_CHAIN_BY_BLOCKCHAIN,
+  SDK_CHAIN_BY_BLOCKCHAIN,
+} from "@/lib/constants/chains";
 
-// Map the blockchain identifiers used in the app to Bridge Kit supported chains
-const CHAIN_MAPPING: Record<string, string> = {
-  "ETH-SEPOLIA": "Ethereum_Sepolia",
-  "AVAX-FUJI": "Avalanche_Fuji",
-  "BASE-SEPOLIA": "Base_Sepolia",
-  "ARC-TESTNET": "Arc_Testnet"
-};
+const bodySchema = z.object({
+  sourceWalletId: z.string().min(1),
+  sourceChain: blockchainSchema,
+  destinationWalletId: z.string().min(1),
+  destinationChain: blockchainSchema,
+  amount: z
+    .union([z.string(), z.number()])
+    .transform((v) => (typeof v === "string" ? Number(v) : v))
+    .refine((n) => Number.isFinite(n) && n > 0, "Amount must be positive"),
+  transferSpeed: z.enum(["FAST", "SLOW"]).default("SLOW"),
+});
 
-export async function POST(request: NextRequest) {
+export const POST = withAuth(async (request, { user, supabase }) => {
   try {
-    const supabase = await createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-
-    if (!user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
-    const body = await request.json();
+    const parsed = await validateJsonBody(request, bodySchema);
+    if (!parsed.ok) return parsed.response;
     const {
       sourceWalletId,
       sourceChain,
       destinationWalletId,
       destinationChain,
-      amount,
-      transferSpeed = "SLOW",
-    } = body;
+      amount: amountNum,
+    } = parsed.data;
 
-    // Validate required fields
-    if (
-      !sourceWalletId ||
-      !sourceChain ||
-      !destinationWalletId ||
-      !destinationChain ||
-      !amount
-    ) {
-      return NextResponse.json(
-        { error: "Missing required fields" },
-        { status: 400 }
-      );
-    }
-
-    // Validate amount
-    const amountNum = parseFloat(amount);
-    if (isNaN(amountNum) || amountNum <= 0) {
-      return NextResponse.json(
-        { error: "Invalid amount" },
-        { status: 400 }
-      );
-    }
-
-    // Bridge Kit expects amount in human-readable decimal format
+    // App Kit expects amount in human-readable decimal format
     const amountString = amountNum.toFixed(2);
 
-    // Map chains to Bridge Kit format
-    const bridgeSourceChain = CHAIN_MAPPING[sourceChain];
-    const bridgeDestChain = CHAIN_MAPPING[destinationChain];
+    // Map chains to App Kit format. The blockchain enum guarantees these
+    // lookups succeed, but keep the guard to satisfy strict type checking.
+    const bridgeSourceChain = APP_KIT_CHAIN_BY_BLOCKCHAIN[sourceChain];
+    const bridgeDestChain = APP_KIT_CHAIN_BY_BLOCKCHAIN[destinationChain];
 
     if (!bridgeSourceChain || !bridgeDestChain) {
       return NextResponse.json(
@@ -89,39 +67,28 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Get source wallet address
-    const sourceWalletResponse = await circleDeveloperSdk.getWallet({
-      id: sourceWalletId,
-    });
-
-    if (!sourceWalletResponse.data?.wallet?.address) {
+    // Confirm both wallet IDs belong to the authenticated user before we
+    // proxy any Circle SDK calls against them.
+    const owned = await assertWalletsOwnedByUser(supabase, user.id, [
+      sourceWalletId,
+      destinationWalletId,
+    ]);
+    if (!owned) {
       return NextResponse.json(
-        { error: "Source wallet not found" },
+        { error: "Wallet not found" },
         { status: 404 }
       );
     }
 
-    const sourceAddress = sourceWalletResponse.data.wallet.address;
+    const sourceAddress =
+      owned.find((w) => w.circle_wallet_id === sourceWalletId)?.address;
+    const destAddress =
+      owned.find((w) => w.circle_wallet_id === destinationWalletId)?.address;
 
-    // Get destination wallet address
-    const destWalletResponse = await circleDeveloperSdk.getWallet({
-      id: destinationWalletId,
-    });
-
-    if (!destWalletResponse.data?.wallet?.address) {
+    if (!sourceAddress || !destAddress) {
       return NextResponse.json(
-        { error: "Destination wallet not found" },
+        { error: "Wallet not found" },
         { status: 404 }
-      );
-    }
-
-    const destAddress = destWalletResponse.data.wallet.address;
-
-    // Validate environment variables
-    if (!process.env.CIRCLE_API_KEY || !process.env.CIRCLE_ENTITY_SECRET) {
-      return NextResponse.json(
-        { error: "Circle API credentials not configured" },
-        { status: 500 }
       );
     }
 
@@ -130,15 +97,7 @@ export async function POST(request: NextRequest) {
     let gatewayBalance = 0;
 
     try {
-      // Map app chain names to Gateway SDK chain names
-      const gatewayChainMapping: Record<string, SupportedChain> = {
-        "ETH-SEPOLIA": "ethSepolia",
-        "AVAX-FUJI": "avalancheFuji",
-        "BASE-SEPOLIA": "baseSepolia",
-        "ARC-TESTNET": "arcTestnet"
-      };
-
-      const gatewaySourceChain = gatewayChainMapping[sourceChain];
+      const gatewaySourceChain = SDK_CHAIN_BY_BLOCKCHAIN[sourceChain];
       if (gatewaySourceChain) {
         const balanceData = await fetchGatewayBalance(sourceAddress as `0x${string}`);
         if (balanceData.balances && Array.isArray(balanceData.balances)) {
@@ -164,46 +123,35 @@ export async function POST(request: NextRequest) {
       // Continue without Gateway option
     }
 
-    // Initialize Bridge Kit
-    const kit = new BridgeKit();
-
-    // Create Circle Wallets adapter
-    const adapter = createCircleWalletsAdapter({
-      apiKey: process.env.CIRCLE_API_KEY,
-      entitySecret: process.env.CIRCLE_ENTITY_SECRET,
-    });
+    const kit = getAppKit();
+    const adapter = getCircleWalletsAdapter();
+    const forwarderDestination = {
+      chain: bridgeDestChain,
+      recipientAddress: destAddress,
+      useForwarder: true as const,
+    };
 
     // Estimate costs for both FAST and SLOW transfers
     const estimates = await Promise.all([
-      // SLOW estimate
-      kit.estimate({
+      kit.estimateBridge({
         from: {
           adapter,
-          chain: bridgeSourceChain as any,
+          chain: bridgeSourceChain,
           address: sourceAddress,
         },
-        to: {
-          adapter,
-          chain: bridgeDestChain as any,
-          address: destAddress,
-        },
+        to: forwarderDestination,
         amount: amountString,
         config: {
           transferSpeed: "SLOW",
         },
       }),
-      // FAST estimate
-      kit.estimate({
+      kit.estimateBridge({
         from: {
           adapter,
-          chain: bridgeSourceChain as any,
+          chain: bridgeSourceChain,
           address: sourceAddress,
         },
-        to: {
-          adapter,
-          chain: bridgeDestChain as any,
-          address: destAddress,
-        },
+        to: forwarderDestination,
         amount: amountString,
         config: {
           transferSpeed: "FAST",
@@ -336,7 +284,8 @@ export async function POST(request: NextRequest) {
       recommendation: gatewayAvailable ? "INSTANT" : recommendation,
       isTestnet: bridgeSourceChain.includes("Sepolia") || bridgeSourceChain.includes("Fuji") || bridgeSourceChain.includes("Testnet"),
       gatewayAvailable,
-      warning: "Important: Ensure both source and destination wallets have sufficient native currency for gas fees. The destination wallet will need gas to receive the minted USDC with automatic forwarding.",
+      warning:
+        "Important: Ensure the source wallet has enough native currency for source-chain gas fees. Forwarding Service handles destination-chain mint submission.",
     });
   } catch (error) {
     console.error("Bridge estimate error:", error);
@@ -348,4 +297,4 @@ export async function POST(request: NextRequest) {
       { status: 500 }
     );
   }
-}
+});

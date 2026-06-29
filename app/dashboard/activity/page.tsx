@@ -32,8 +32,6 @@ import {
   IconRefresh,
 } from "@tabler/icons-react"
 import { format } from "date-fns"
-import { toast } from "sonner"
-
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { useRouter, useSearchParams } from "next/navigation"
@@ -47,10 +45,10 @@ import {
 } from "@/components/ui/table"
 import { Badge } from "@/components/ui/badge"
 import { Skeleton } from "@/components/ui/skeleton"
-import { createClient } from "@/lib/supabase/client"
-import { BLOCK_EXPLORERS } from "@/lib/constants/block-explorers"
+import { isGatewayDepositRecipient } from "@/lib/constants/chains"
+import { shortenAddress, getExplorerUrl } from "@/lib/utils/data-formatters"
+import { useBalanceContext } from "@/lib/contexts/balance-context"
 
-const GATEWAY_ADDRESS = "0x0077777d7EBA4688BDeF3E311b846F25870A19B9"
 const ITEMS_PER_PAGE = 10
 
 type ActivityItem = {
@@ -68,19 +66,6 @@ type ActivityItem = {
 type SortConfig = {
   key: "amount" | "timestamp" | null
   direction: "asc" | "desc" | null
-}
-
-function shortenAddress(address: string) {
-  if (!address) return ""
-  if (address.length < 10) return address
-  return `${address.slice(0, 6)}...${address.slice(-4)}`
-}
-
-function getExplorerUrl(blockchain: string | undefined, address: string) {
-  if (!blockchain) return "#"
-  const baseUrl = BLOCK_EXPLORERS[blockchain]
-  if (!baseUrl) return "#"
-  return `${baseUrl}/address/${address}`
 }
 
 function ActivityContent() {
@@ -107,86 +92,58 @@ React.useEffect(() => {
     direction: "desc",
   })
 
-  const supabase = createClient()
+  const { fullWallets, transactions, isLoadingData } = useBalanceContext()
 
+  // Derive activity items from the shared context's wallets+transactions.
+  // No standalone fetch — the BalanceProvider's Realtime channel keeps these
+  // in sync.
   React.useEffect(() => {
-    const fetchData = async () => {
-      try {
-        const { data: { user } } = await supabase.auth.getUser()
-        if (!user) return
+    setLoading(isLoadingData)
 
-        const { data: walletsData, error: walletsError } = await supabase
-          .from("wallets")
-          .select("*")
-          .eq("user_id", user.id)
-          .order("created_at", { ascending: false })
+    const walletActivities: ActivityItem[] = fullWallets.map((w) => ({
+      id: `create-${w.id}`,
+      type: "wallet_created",
+      title: w.name,
+      blockchain: w.blockchain,
+      address: w.address,
+      timestamp: w.created_at,
+    }))
 
-        if (walletsError) throw walletsError
+    const transactionActivities: ActivityItem[] = transactions.map((tx) => {
+      const isDeposit = isGatewayDepositRecipient(tx.recipient_address)
 
-        const { data: transactionsData, error: transactionsError } = await supabase
-          .from("transactions")
-          .select("*")
-          .eq("user_id", user.id)
-          .order("created_at", { ascending: false })
+      let type: ActivityItem["type"] = "transfer"
+      let title = "Transfer"
 
-        if (transactionsError) throw transactionsError
-
-        const wallets = walletsData || []
-        const transactions = transactionsData || []
-
-        const walletActivities: ActivityItem[] = wallets.map((w: any) => ({
-          id: `create-${w.id}`,
-          type: "wallet_created",
-          title: w.name,
-          blockchain: w.blockchain,
-          address: w.address,
-          timestamp: w.created_at,
-        }))
-
-        const transactionActivities: ActivityItem[] = transactions.map((tx: any) => {
-          const isDeposit = tx.recipient_address.toLowerCase() === GATEWAY_ADDRESS.toLowerCase()
-          
-          let type: ActivityItem["type"] = "transfer"
-          let title = "Transfer"
-
-          if (tx.type === "REBALANCE") {
-            type = "rebalance"
-            title = "Rebalance"
-          } else if (isDeposit) {
-            type = "deposit"
-            title = "Gateway Deposit"
-          }
-
-          const senderWallet = wallets.find(
-            (w: any) => w.address.toLowerCase() === tx.sender_address.toLowerCase()
-          )
-
-          return {
-            id: `tx-${tx.id}`,
-            type,
-            title,
-            amount: tx.amount,
-            blockchain: senderWallet?.blockchain || tx.blockchain,
-            address: tx.sender_address,
-            secondaryAddress: tx.recipient_address,
-            timestamp: tx.created_at,
-          }
-        })
-
-        setActivities([...walletActivities, ...transactionActivities])
-      } catch (error) {
-        console.error("Error loading activity:", error)
-        toast.error("Failed to load activity history")
-      } finally {
-        setLoading(false)
+      if (tx.type === "REBALANCE") {
+        type = "rebalance"
+        title = "Rebalance"
+      } else if (isDeposit) {
+        type = "deposit"
+        title = "Gateway Deposit"
       }
-    }
 
-    fetchData()
-  }, [supabase])
+      const senderWallet = fullWallets.find(
+        (w) => w.address.toLowerCase() === (tx.sender_address ?? "").toLowerCase()
+      )
+
+      return {
+        id: `tx-${tx.id}`,
+        type,
+        title,
+        amount: tx.amount,
+        blockchain: senderWallet?.blockchain || tx.blockchain,
+        address: tx.sender_address,
+        secondaryAddress: tx.recipient_address,
+        timestamp: tx.created_at,
+      }
+    })
+
+    setActivities([...walletActivities, ...transactionActivities])
+  }, [fullWallets, transactions, isLoadingData])
 
   const handleSort = (key: "amount" | "timestamp") => {
-    setSortConfig((current: any) => {
+    setSortConfig((current) => {
       if (current.key === key) {
         if (current.direction === "asc") return { key, direction: "desc" }
         if (current.direction === "desc") return { key: null, direction: null }
@@ -196,16 +153,16 @@ React.useEffect(() => {
   }
 
   const sortedActivities = React.useMemo(() => {
-    let result = activities.filter((item: any) =>
+    const result = activities.filter((item) =>
       item.title.toLowerCase().includes(filter.toLowerCase()) ||
       item.address?.toLowerCase().includes(filter.toLowerCase()) ||
       item.secondaryAddress?.toLowerCase().includes(filter.toLowerCase())
     )
 
     if (sortConfig.key && sortConfig.direction) {
-      result.sort((a: any, b: any) => {
-        let valA: number | string = 0
-        let valB: number | string = 0
+      result.sort((a, b) => {
+        let valA: number = 0
+        let valB: number = 0
 
         if (sortConfig.key === "amount") {
           valA = a.amount || 0
@@ -220,7 +177,9 @@ React.useEffect(() => {
         return 0
       })
     } else {
-      result.sort((a: any, b: any) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+      result.sort(
+        (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+      )
     }
 
     return result
@@ -265,7 +224,7 @@ React.useEffect(() => {
             placeholder="Search by address or name..."
             className="pl-9"
             value={filter}
-            onChange={(e: any) => setFilter(e.target.value)}
+            onChange={(e) => setFilter(e.target.value)}
           />
         </div>
       </div>
@@ -317,7 +276,7 @@ React.useEffect(() => {
                 </TableCell>
               </TableRow>
             ) : (
-              paginatedActivities.map((item: any) => (
+              paginatedActivities.map((item) => (
                 <TableRow
                   key={item.id}
                   className="cursor-pointer hover:bg-muted/50"
@@ -360,7 +319,7 @@ React.useEffect(() => {
                               {shortenAddress(item.address || "")}
                             </a>
                             <span className="mx-1">→</span>
-                            {item.secondaryAddress === GATEWAY_ADDRESS ? (
+                            {isGatewayDepositRecipient(item.secondaryAddress) ? (
                               <span className="font-mono">Gateway Balance</span>
                             ) : (
                               <a
@@ -415,7 +374,7 @@ React.useEffect(() => {
             <Button
               variant="outline"
               size="sm"
-              onClick={() => setCurrentPage((p: any) => Math.max(1, p - 1))}
+              onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
               disabled={currentPage === 1}
             >
               <IconChevronLeft className="mr-2 h-4 w-4" />
@@ -424,7 +383,7 @@ React.useEffect(() => {
             <Button
               variant="outline"
               size="sm"
-              onClick={() => setCurrentPage((p: any) => Math.min(totalPages, p + 1))}
+              onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
               disabled={currentPage === totalPages}
             >
               Next

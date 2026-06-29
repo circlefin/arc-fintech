@@ -18,11 +18,36 @@
 
 "use client"
 
-import { createContext, useContext, useEffect, useState, useRef, useCallback, useMemo, ReactNode } from "react"
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useState,
+  useRef,
+  useCallback,
+  useMemo,
+  ReactNode,
+} from "react"
 import { createClient } from "@/lib/supabase/client"
 import { RealtimeChannel } from "@supabase/supabase-js"
+import {
+  ChainBalances,
+  EMPTY_CHAIN_BALANCES,
+  FullTransaction,
+  FullWallet,
+  Wallet,
+} from "@/lib/balances/types"
+import {
+  computeWalletTotal,
+  fetchGatewayBalance as fetchGatewayBalanceApi,
+  fetchWalletBalance as fetchWalletBalanceApi,
+} from "@/lib/balances/fetcher"
+import {
+  ProcessedSet,
+  subscribeBalanceRealtime,
+} from "@/lib/balances/realtime"
 
-const GATEWAY_ADDRESS = "0x0077777d7EBA4688BDeF3E311b846F25870A19B9"
+export type { FullWallet, FullTransaction } from "@/lib/balances/types"
 
 // Debounce delay - prevents rapid consecutive API calls
 const DEBOUNCE_DELAY = 3000
@@ -30,44 +55,48 @@ const DEBOUNCE_DELAY = 3000
 // Cooldown period - minimum time between actual API calls
 const FETCH_COOLDOWN = 5000
 
-type Wallet = {
-  id: string
-  address: string
-  circle_wallet_id: string
-  blockchain: string
-}
-
-type Transaction = {
-  id: string
-  status: string
-  sender_address: string
-  recipient_address: string
-}
-
-type ChainBalances = {
-  ethSepolia: number
-  baseSepolia: number
-  avalancheFuji: number
-  arcTestnet: number
-}
-
 type BalanceContextType = {
-  // Gateway balance data (for SectionCards)
+  /**
+   * On-wallet USDC per chain (viem `balanceOf` against each USDC contract).
+   * These are funds the user has not yet deposited into Gateway.
+   */
   chainBalances: ChainBalances
+  /** Confirmed Gateway balance per chain. */
+  gatewayChainBalances: ChainBalances
+  /** Pending Gateway balance per chain. */
+  gatewayPendingChainBalances: ChainBalances
+  /** Total confirmed Gateway balance across all chains and wallets. */
   gatewayTotal: number
+  /** Total pending Gateway balance across all chains and wallets. */
+  gatewayPending: number
 
-  // Wallet balance data (for Dashboard)
   walletBalances: Record<string, string>
   walletTotal: number
 
-  // Loading states
   isLoadingGateway: boolean
   isLoadingWallet: boolean
+  isLoadingData: boolean
 
-  // Wallets list
+  /** Slim wallet list used internally (exposed for legacy consumers). */
   wallets: Wallet[]
 
-  // Manual refresh functions (for dialogs, etc.)
+  /**
+   * Full `wallets` rows for everything outside the balance loop — activity
+   * feed, wallets table, dialogs. Owned by this provider so we keep a single
+   * Realtime subscription for wallet changes.
+   */
+  fullWallets: FullWallet[]
+
+  /**
+   * All `transactions` rows for the current user, kept in sync via the
+   * provider's Realtime subscription. Replaces the per-page channels that
+   * previously duplicated this load.
+   */
+  transactions: FullTransaction[]
+
+  /** Most recent dataset refresh (used by status indicators). */
+  lastUpdated: Date | null
+
   refreshGatewayBalance: () => Promise<void>
   refreshWalletBalance: () => Promise<void>
 }
@@ -84,86 +113,53 @@ export function useBalanceContext() {
 
 export function BalanceProvider({ children }: { children: ReactNode }) {
   const [wallets, setWallets] = useState<Wallet[]>([])
+  const [fullWallets, setFullWallets] = useState<FullWallet[]>([])
+  const [transactions, setTransactions] = useState<FullTransaction[]>([])
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
+  const [isLoadingData, setIsLoadingData] = useState(true)
   const walletsRef = useRef<Wallet[]>([])
 
-  // Gateway balance state
   const [chainBalances, setChainBalances] = useState<ChainBalances>({
-    ethSepolia: 0,
-    baseSepolia: 0,
-    avalancheFuji: 0,
-    arcTestnet: 0,
+    ...EMPTY_CHAIN_BALANCES,
+  })
+  const [gatewayChainBalances, setGatewayChainBalances] = useState<ChainBalances>({
+    ...EMPTY_CHAIN_BALANCES,
+  })
+  const [gatewayPendingChainBalances, setGatewayPendingChainBalances] = useState<ChainBalances>({
+    ...EMPTY_CHAIN_BALANCES,
   })
   const [gatewayTotal, setGatewayTotal] = useState(0)
+  const [gatewayPending, setGatewayPending] = useState(0)
   const [isLoadingGateway, setIsLoadingGateway] = useState(true)
 
-  // Wallet balance state
   const [walletBalances, setWalletBalances] = useState<Record<string, string>>({})
   const [walletTotal, setWalletTotal] = useState(0)
   const [isLoadingWallet, setIsLoadingWallet] = useState(true)
 
-  // Debounce and cooldown refs
   const gatewayDebounceRef = useRef<NodeJS.Timeout | null>(null)
   const walletDebounceRef = useRef<NodeJS.Timeout | null>(null)
   const lastGatewayFetchRef = useRef<number>(0)
   const lastWalletFetchRef = useRef<number>(0)
 
-  // Track processed transaction IDs to avoid duplicate processing
-  const processedTxRef = useRef<Set<string>>(new Set())
+  // Dedupes bursty Realtime UPDATE payloads (Bridge Kit fires twice on settle).
+  const processedTxRef = useRef<ProcessedSet>(new ProcessedSet())
 
   const supabase = useMemo(() => createClient(), [])
 
-  // Keep ref in sync
   useEffect(() => {
     walletsRef.current = wallets
   }, [wallets])
 
-  // Fetch gateway balance
-  const fetchGatewayBalance = useCallback(async (currentWallets: Wallet[]) => {
-    if (!currentWallets || currentWallets.length === 0) {
-      setChainBalances({ ethSepolia: 0, baseSepolia: 0, avalancheFuji: 0, arcTestnet: 0 })
-      setGatewayTotal(0)
-      setIsLoadingGateway(false)
-      return
-    }
-
-    const addresses = currentWallets.map((w) => w.address)
-
+  const loadGatewayBalance = useCallback(async (currentWallets: Wallet[]) => {
     try {
-      const res = await fetch("/api/gateway/balance", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ addresses }),
-      })
-
-      if (!res.ok) throw new Error("Failed to fetch gateway balance")
-
-      const data = await res.json()
-
-      const totals: ChainBalances = {
-        ethSepolia: 0,
-        baseSepolia: 0,
-        avalancheFuji: 0,
-        arcTestnet: 0,
-      }
-
-      let grandTotal = 0
-
-      if (data.balances && Array.isArray(data.balances)) {
-        data.balances.forEach((walletResult: any) => {
-          grandTotal += walletResult.gatewayTotal || 0
-
-          if (walletResult.chainBalances && Array.isArray(walletResult.chainBalances)) {
-            walletResult.chainBalances.forEach((cb: any) => {
-              if (totals[cb.chain as keyof ChainBalances] !== undefined) {
-                totals[cb.chain as keyof ChainBalances] += cb.balance
-              }
-            })
-          }
-        })
-      }
-
-      setChainBalances(totals)
-      setGatewayTotal(grandTotal)
+      const summary = await fetchGatewayBalanceApi(currentWallets)
+      // `totals` is on-wallet (un-deposited) USDC per chain via viem.
+      setChainBalances(summary.totals)
+      // `gatewayTotals` is confirmed Gateway balance per chain via App Kit.
+      setGatewayChainBalances(summary.gatewayTotals)
+      setGatewayPendingChainBalances(summary.gatewayPendingTotals)
+      setGatewayTotal(summary.grandTotal)
+      setGatewayPending(summary.pendingTotal)
       lastGatewayFetchRef.current = Date.now()
     } catch (error) {
       console.error("Error fetching gateway balance:", error)
@@ -172,52 +168,14 @@ export function BalanceProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  // Fetch wallet balance
-  const fetchWalletBalance = useCallback(async (currentWallets: Wallet[]) => {
-    if (!currentWallets || currentWallets.length === 0) {
-      setWalletBalances({})
-      setWalletTotal(0)
-      setIsLoadingWallet(false)
-      return
-    }
-
-    const walletIds = currentWallets.map((w) => w.circle_wallet_id)
-
+  const loadWalletBalance = useCallback(async (currentWallets: Wallet[]) => {
     try {
-      const res = await fetch("/api/wallet/balance", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ walletIds }),
-      })
-
-      if (!res.ok) throw new Error("Failed to fetch wallet balance")
-
-      const data = await res.json()
-
+      const data = await fetchWalletBalanceApi(currentWallets)
       setWalletBalances((prev) => {
         const newBalances = { ...prev, ...data }
-
-        // Calculate total
-        const walletKey = new Map<string, number>()
-        walletsRef.current.forEach((wallet) => {
-          const balance = newBalances[wallet.circle_wallet_id]
-          if (typeof balance === "string") {
-            const numericPart = balance.split(" ")[0].replace(/[$,]/g, "")
-            const num = parseFloat(numericPart)
-            if (!isNaN(num)) {
-              const key = `${wallet.address.toLowerCase()}-${wallet.blockchain}`
-              const existing = walletKey.get(key) || 0
-              walletKey.set(key, Math.max(existing, num))
-            }
-          }
-        })
-
-        const sum = Array.from(walletKey.values()).reduce((total, bal) => total + bal, 0)
-        setWalletTotal(sum)
-
+        setWalletTotal(computeWalletTotal(walletsRef.current, newBalances))
         return newBalances
       })
-
       lastWalletFetchRef.current = Date.now()
     } catch (error) {
       console.error("Error fetching wallet balance:", error)
@@ -226,193 +184,274 @@ export function BalanceProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  // Debounced gateway refresh with cooldown
+  // Debounced refreshers — used by Realtime handlers so a burst of webhook
+  // UPDATEs collapses into a single Circle round-trip.
   const debouncedGatewayRefresh = useCallback(() => {
-    if (gatewayDebounceRef.current) {
-      clearTimeout(gatewayDebounceRef.current)
-    }
-
+    if (gatewayDebounceRef.current) clearTimeout(gatewayDebounceRef.current)
     const timeSinceLastFetch = Date.now() - lastGatewayFetchRef.current
-    const delay = timeSinceLastFetch < FETCH_COOLDOWN
-      ? Math.max(DEBOUNCE_DELAY, FETCH_COOLDOWN - timeSinceLastFetch)
-      : DEBOUNCE_DELAY
-
+    const delay =
+      timeSinceLastFetch < FETCH_COOLDOWN
+        ? Math.max(DEBOUNCE_DELAY, FETCH_COOLDOWN - timeSinceLastFetch)
+        : DEBOUNCE_DELAY
     gatewayDebounceRef.current = setTimeout(() => {
-      fetchGatewayBalance(walletsRef.current)
+      loadGatewayBalance(walletsRef.current)
     }, delay)
-  }, [fetchGatewayBalance])
+  }, [loadGatewayBalance])
 
-  // Debounced wallet refresh with cooldown
   const debouncedWalletRefresh = useCallback(() => {
-    if (walletDebounceRef.current) {
-      clearTimeout(walletDebounceRef.current)
-    }
-
+    if (walletDebounceRef.current) clearTimeout(walletDebounceRef.current)
     const timeSinceLastFetch = Date.now() - lastWalletFetchRef.current
-    const delay = timeSinceLastFetch < FETCH_COOLDOWN
-      ? Math.max(DEBOUNCE_DELAY, FETCH_COOLDOWN - timeSinceLastFetch)
-      : DEBOUNCE_DELAY
-
+    const delay =
+      timeSinceLastFetch < FETCH_COOLDOWN
+        ? Math.max(DEBOUNCE_DELAY, FETCH_COOLDOWN - timeSinceLastFetch)
+        : DEBOUNCE_DELAY
     walletDebounceRef.current = setTimeout(() => {
-      fetchWalletBalance(walletsRef.current)
+      loadWalletBalance(walletsRef.current)
     }, delay)
-  }, [fetchWalletBalance])
+  }, [loadWalletBalance])
 
-  // Manual refresh functions (immediate, bypasses debounce)
+  // Manual refreshers used by dialogs after a user-initiated action — they
+  // bypass debouncing because the user expects immediate feedback.
   const refreshGatewayBalance = useCallback(async () => {
-    await fetchGatewayBalance(walletsRef.current)
-  }, [fetchGatewayBalance])
+    await loadGatewayBalance(walletsRef.current)
+  }, [loadGatewayBalance])
 
   const refreshWalletBalance = useCallback(async () => {
-    await fetchWalletBalance(walletsRef.current)
-  }, [fetchWalletBalance])
+    await loadWalletBalance(walletsRef.current)
+  }, [loadWalletBalance])
 
-  // Single Realtime subscription for the entire app
   useEffect(() => {
     let channel: RealtimeChannel | null = null
 
     const setupData = async () => {
       try {
-        const { data: { user } } = await supabase.auth.getUser()
+        const {
+          data: { user },
+        } = await supabase.auth.getUser()
         if (!user) return
 
-        // Fetch initial wallets
-        const { data: walletsData, error } = await supabase
-          .from("wallets")
-          .select("id, address, circle_wallet_id, blockchain")
-          .eq("user_id", user.id)
-
-        if (error) throw error
-
-        const initialWallets = (walletsData || []) as Wallet[]
-        setWallets(initialWallets)
-        walletsRef.current = initialWallets
-
-        // Fetch initial balances
-        await Promise.all([
-          fetchGatewayBalance(initialWallets),
-          fetchWalletBalance(initialWallets),
+        // Load wallets and transactions in parallel. We previously fetched a
+        // slim wallets shape here and the dashboard refetched `*` itself in a
+        // second channel — collapsed to one place so consumers stay in sync.
+        const [walletsRes, txRes] = await Promise.all([
+          supabase
+            .from("wallets")
+            .select("*")
+            .eq("user_id", user.id)
+            .order("created_at", { ascending: false }),
+          supabase
+            .from("transactions")
+            .select("*")
+            .eq("user_id", user.id)
+            .order("created_at", { ascending: false }),
         ])
 
-        // Single Realtime subscription
-        channel = supabase
-          .channel("balance-context-realtime")
-          .on(
-            "postgres_changes",
-            {
-              event: "*",
-              schema: "public",
-              table: "wallets",
-              filter: `user_id=eq.${user.id}`,
-            },
-            (payload) => {
-              if (payload.eventType === "INSERT") {
-                const newWallet = payload.new as Wallet
-                setWallets((prev) => {
-                  const updated = [newWallet, ...prev]
-                  walletsRef.current = updated
-                  // Immediate fetch for new wallet (user expects to see it)
-                  fetchWalletBalance([newWallet])
-                  // Debounced gateway refresh
-                  const isNewAddress = !prev.some(
-                    (w) => w.address.toLowerCase() === newWallet.address.toLowerCase()
-                  )
-                  if (isNewAddress) {
-                    debouncedGatewayRefresh()
-                  }
-                  return updated
-                })
-              } else if (payload.eventType === "DELETE") {
-                setWallets((prev) => {
-                  const updated = prev.filter((w) => w.id !== payload.old.id)
-                  walletsRef.current = updated
-                  if (updated.length === 0) {
-                    setGatewayTotal(0)
-                    setWalletTotal(0)
-                  }
-                  return updated
-                })
-              } else if (payload.eventType === "UPDATE") {
-                setWallets((prev) => {
-                  const updated = prev.map((w) =>
-                    w.id === payload.new.id ? (payload.new as Wallet) : w
-                  )
-                  walletsRef.current = updated
-                  return updated
-                })
-              }
-            }
+        if (walletsRes.error) throw walletsRes.error
+        if (txRes.error) throw txRes.error
+
+        const fullWalletsData = (walletsRes.data || []) as FullWallet[]
+        // Slim list is what feeds the balance fetchers — rows missing the
+        // critical fields (address/circle_wallet_id/blockchain are all
+        // nullable in the wallets table) would just produce 0 balances and
+        // crash the Realtime handlers later if we let them through.
+        const initialWallets: Wallet[] = fullWalletsData
+          .filter(
+            (w) => !!w.address && !!w.circle_wallet_id && !!w.blockchain
           )
-          .on(
-            "postgres_changes",
-            {
-              event: "UPDATE",
-              schema: "public",
-              table: "transactions",
-              filter: `user_id=eq.${user.id}`,
-            },
-            (payload) => {
-              const updatedTx = payload.new as Transaction
+          .map((w) => ({
+            id: w.id,
+            address: w.address,
+            circle_wallet_id: w.circle_wallet_id,
+            blockchain: w.blockchain,
+          }))
 
-              // Only process COMPLETE status (terminal state)
-              if (updatedTx.status !== "COMPLETE") return
+        setFullWallets(fullWalletsData)
+        setTransactions((txRes.data || []) as FullTransaction[])
+        setWallets(initialWallets)
+        walletsRef.current = initialWallets
+        setLastUpdated(new Date())
+        setIsLoadingData(false)
 
-              // Skip if we've already processed this transaction
-              if (processedTxRef.current.has(updatedTx.id)) return
-              processedTxRef.current.add(updatedTx.id)
+        await Promise.all([
+          loadGatewayBalance(initialWallets),
+          loadWalletBalance(initialWallets),
+        ])
 
-              // Clean up old processed IDs (keep last 100)
-              if (processedTxRef.current.size > 100) {
-                const ids = Array.from(processedTxRef.current)
-                processedTxRef.current = new Set(ids.slice(-50))
+        channel = subscribeBalanceRealtime({
+          supabase,
+          userId: user.id,
+          onWalletChange: ({ eventType, newRow, oldId }) => {
+            if (eventType === "INSERT" && newRow) {
+              // The wallets table allows null address/circle_wallet_id/blockchain
+              // (see 20251210161755_create_wallets_table.sql), and Circle's
+              // create-wallet flow inserts the row before the address is
+              // populated. Skip side-effects until the row is actually usable
+              // — the follow-up UPDATE will pick it up.
+              setFullWallets((prev) =>
+                prev.some((w) => w.id === newRow.id) ? prev : [newRow, ...prev]
+              )
+              setLastUpdated(new Date())
+
+              if (
+                !newRow.address ||
+                !newRow.circle_wallet_id ||
+                !newRow.blockchain
+              ) {
+                return
               }
 
-              // Check if transaction involves our wallets
-              const isRelevant = walletsRef.current.some(
-                (w) =>
-                  w.address.toLowerCase() === updatedTx.sender_address.toLowerCase() ||
-                  w.address.toLowerCase() === updatedTx.recipient_address.toLowerCase()
+              const slim: Wallet = {
+                id: newRow.id,
+                address: newRow.address,
+                circle_wallet_id: newRow.circle_wallet_id,
+                blockchain: newRow.blockchain,
+              }
+              setWallets((prev) => {
+                if (prev.some((w) => w.id === slim.id)) return prev
+                const updated = [slim, ...prev]
+                walletsRef.current = updated
+                loadWalletBalance([slim])
+                const isNewAddress = !prev.some(
+                  (w) =>
+                    !!w.address &&
+                    w.address.toLowerCase() === slim.address.toLowerCase()
+                )
+                if (isNewAddress) debouncedGatewayRefresh()
+                return updated
+              })
+            } else if (eventType === "UPDATE" && newRow) {
+              setFullWallets((prev) =>
+                prev.map((w) => (w.id === newRow.id ? newRow : w))
               )
+              setLastUpdated(new Date())
 
+              // Same nullable-column guard as INSERT. If the UPDATE is what
+              // fills in a previously-empty address, promote the row into
+              // the slim list now (and refresh balances), otherwise just
+              // update the existing entry in place.
+              if (
+                !newRow.address ||
+                !newRow.circle_wallet_id ||
+                !newRow.blockchain
+              ) {
+                return
+              }
+
+              const slim: Wallet = {
+                id: newRow.id,
+                address: newRow.address,
+                circle_wallet_id: newRow.circle_wallet_id,
+                blockchain: newRow.blockchain,
+              }
+              setWallets((prev) => {
+                const existing = prev.find((w) => w.id === slim.id)
+                if (!existing) {
+                  const updated = [slim, ...prev]
+                  walletsRef.current = updated
+                  loadWalletBalance([slim])
+                  debouncedGatewayRefresh()
+                  return updated
+                }
+                const updated = prev.map((w) => (w.id === slim.id ? slim : w))
+                walletsRef.current = updated
+                return updated
+              })
+            } else if (eventType === "DELETE" && oldId) {
+              setFullWallets((prev) => prev.filter((w) => w.id !== oldId))
+              setWallets((prev) => {
+                const updated = prev.filter((w) => w.id !== oldId)
+                walletsRef.current = updated
+                if (updated.length === 0) {
+                  setGatewayTotal(0)
+                  setGatewayPending(0)
+                  setGatewayChainBalances({ ...EMPTY_CHAIN_BALANCES })
+                  setGatewayPendingChainBalances({ ...EMPTY_CHAIN_BALANCES })
+                  setWalletTotal(0)
+                }
+                return updated
+              })
+              setLastUpdated(new Date())
+            }
+          },
+          onTransactionChange: ({ eventType, newRow, oldId }) => {
+            if (eventType === "INSERT" && newRow) {
+              setTransactions((prev) =>
+                prev.some((tx) => tx.id === newRow.id) ? prev : [newRow, ...prev]
+              )
+              setLastUpdated(new Date())
+            } else if (eventType === "UPDATE" && newRow) {
+              setTransactions((prev) =>
+                prev.map((tx) => (tx.id === newRow.id ? newRow : tx))
+              )
+              setLastUpdated(new Date())
+
+              // Only refresh balances on terminal state to avoid hammering
+              // Circle's API. ProcessedSet dedupes the bursty UPDATE pairs
+              // that fire during Bridge Kit settlement.
+              if (newRow.status !== "COMPLETE") return
+              if (processedTxRef.current.has(newRow.id)) return
+              processedTxRef.current.add(newRow.id)
+
+              // Defensive lower-casing: any of these address fields can be
+              // null in the schema, and Realtime payloads occasionally arrive
+              // without the full row.
+              const sender = newRow.sender_address?.toLowerCase() ?? ""
+              const recipient = newRow.recipient_address?.toLowerCase() ?? ""
+              const isRelevant = walletsRef.current.some((w) => {
+                const addr = w.address?.toLowerCase() ?? ""
+                if (!addr) return false
+                return addr === sender || addr === recipient
+              })
               if (isRelevant) {
                 debouncedWalletRefresh()
                 debouncedGatewayRefresh()
               }
+            } else if (eventType === "DELETE" && oldId) {
+              setTransactions((prev) => prev.filter((tx) => tx.id !== oldId))
+              setLastUpdated(new Date())
             }
-          )
-          .subscribe()
+          },
+        })
       } catch (error) {
         console.error("Error setting up balance context:", error)
         setIsLoadingGateway(false)
         setIsLoadingWallet(false)
+        setIsLoadingData(false)
       }
     }
 
     setupData()
 
     return () => {
-      if (channel) {
-        supabase.removeChannel(channel)
-      }
-      if (gatewayDebounceRef.current) {
-        clearTimeout(gatewayDebounceRef.current)
-      }
-      if (walletDebounceRef.current) {
-        clearTimeout(walletDebounceRef.current)
-      }
+      if (channel) supabase.removeChannel(channel)
+      if (gatewayDebounceRef.current) clearTimeout(gatewayDebounceRef.current)
+      if (walletDebounceRef.current) clearTimeout(walletDebounceRef.current)
     }
-  }, [supabase, fetchGatewayBalance, fetchWalletBalance, debouncedGatewayRefresh, debouncedWalletRefresh])
+  }, [
+    supabase,
+    loadGatewayBalance,
+    loadWalletBalance,
+    debouncedGatewayRefresh,
+    debouncedWalletRefresh,
+  ])
 
   return (
     <BalanceContext.Provider
       value={{
         chainBalances,
+        gatewayChainBalances,
+        gatewayPendingChainBalances,
         gatewayTotal,
+        gatewayPending,
         walletBalances,
         walletTotal,
         isLoadingGateway,
         isLoadingWallet,
+        isLoadingData,
         wallets,
+        fullWallets,
+        transactions,
+        lastUpdated,
         refreshGatewayBalance,
         refreshWalletBalance,
       }}

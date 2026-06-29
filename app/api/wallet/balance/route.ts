@@ -16,40 +16,44 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { NextResponse } from "next/server";
 import { circleDeveloperSdk } from "@/lib/circle/developer-controlled-wallets-client";
 import { getUsdcBalance, type SupportedChain, USDC_ADDRESSES } from "@/lib/circle/gateway-sdk";
 import type { Address } from "viem";
+import { withAuth } from "@/lib/api/with-auth";
 
-export async function POST(req: NextRequest) {
+export const POST = withAuth(async (req, { user, supabase }) => {
   try {
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-
-    if (!user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
     // Extract walletIds from the request body
     const body = await req.json();
-    const { walletIds } = body;
+    let walletIds: string[] = body?.walletIds;
 
     if (!walletIds || !Array.isArray(walletIds) || walletIds.length === 0) {
       return NextResponse.json({ error: "Invalid walletIds provided" }, { status: 400 });
     }
 
-    // 1. Batch fetch wallet info from Supabase for all requested wallets
-    // Need address for Gateway wallets to fetch on-chain balance
+    // 1. Batch fetch wallet info from Supabase for all requested wallets.
+    // CRITICAL: scope to user_id so a caller cannot pass another user's
+    // circle_wallet_id and have us proxy a Circle SDK call against it.
     const { data: walletMetadata, error: dbError } = await supabase
       .from("wallets")
       .select("circle_wallet_id, blockchain, type, address")
+      .eq("user_id", user.id)
       .in("circle_wallet_id", walletIds);
 
     if (dbError) {
       console.error("Database error fetching wallet metadata:", dbError);
       throw new Error("Failed to retrieve wallet metadata");
     }
+
+    // Restrict the rest of the function to wallet IDs we just verified are
+    // owned by this user. Anything else gets dropped silently.
+    const ownedWalletIds = new Set(
+      (walletMetadata ?? [])
+        .map((w) => w.circle_wallet_id)
+        .filter((id): id is string => typeof id === "string" && id.length > 0)
+    );
+    walletIds = walletIds.filter((id: string) => ownedWalletIds.has(id));
 
     // Create lookup maps for O(1) access
     const chainMap = new Map<string, string>();
@@ -150,4 +154,4 @@ export async function POST(req: NextRequest) {
       { status: 500 }
     );
   }
-}
+});

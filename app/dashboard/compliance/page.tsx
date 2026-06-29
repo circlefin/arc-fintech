@@ -18,7 +18,8 @@
 
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { ComplianceLog } from "@/types/compliance";
 import { ComplianceStatusBadge } from "@/components/compliance-status-badge";
 import { ComplianceDetailsDialog } from "@/components/compliance-details-dialog";
@@ -46,11 +47,9 @@ import { Label } from "@/components/ui/label";
 import { IconLoader2, IconFileText, IconCopy, IconDownload, IconFilter, IconX } from "@tabler/icons-react";
 import { getRiskCategoryLabel } from "@/lib/compliance/utils";
 import { toast } from "sonner";
-import { BLOCK_EXPLORERS } from "@/lib/constants/block-explorers";
+import { shortenAddress, getExplorerUrl } from "@/lib/utils/data-formatters";
 
 export default function CompliancePage() {
-  const [logs, setLogs] = useState<ComplianceLog[]>([]);
-  const [loading, setLoading] = useState(true);
   const [resultFilter, setResultFilter] = useState<string>("all");
   const [blockchainFilter, setBlockchainFilter] = useState<string>("all");
   const [startDate, setStartDate] = useState<string>("");
@@ -59,42 +58,27 @@ export default function CompliancePage() {
   const [showDetails, setShowDetails] = useState(false);
   const [showFilters, setShowFilters] = useState(false);
 
-  useEffect(() => {
-    fetchLogs();
-  }, [resultFilter, blockchainFilter, startDate, endDate]);
-
-  const fetchLogs = async () => {
-    setLoading(true);
-    try {
+  // Use TanStack Query for filtered/paginated reads. The query key includes
+  // every filter so changes refetch automatically without a useEffect chain.
+  const { data: logs = [], isLoading: loading } = useQuery<ComplianceLog[]>({
+    queryKey: ["compliance-logs", resultFilter, blockchainFilter, startDate, endDate],
+    queryFn: async () => {
       const params = new URLSearchParams();
-      
-      if (resultFilter !== "all") {
-        params.append("result", resultFilter);
-      }
-      
-      if (blockchainFilter !== "all") {
-        params.append("blockchain", blockchainFilter);
-      }
-      
-      if (startDate) {
-        params.append("startDate", startDate);
-      }
-      
-      if (endDate) {
-        params.append("endDate", endDate);
-      }
+      if (resultFilter !== "all") params.append("result", resultFilter);
+      if (blockchainFilter !== "all") params.append("blockchain", blockchainFilter);
+      if (startDate) params.append("startDate", startDate);
+      if (endDate) params.append("endDate", endDate);
 
       const url = `/api/compliance/logs${params.toString() ? `?${params.toString()}` : ""}`;
       const response = await fetch(url);
+      if (!response.ok) {
+        toast.error("Failed to load compliance logs");
+        throw new Error("Failed to load compliance logs");
+      }
       const data = await response.json();
-      setLogs(data.logs || []);
-    } catch (error) {
-      console.error("Failed to fetch compliance logs:", error);
-      toast.error("Failed to load compliance logs");
-    } finally {
-      setLoading(false);
-    }
-  };
+      return data.logs || [];
+    },
+  });
 
   const handleViewDetails = (log: ComplianceLog) => {
     setSelectedLog(log);
@@ -132,21 +116,9 @@ export default function CompliancePage() {
     }
   };
 
-  const shortenAddress = (address: string) => {
-    if (!address) return "";
-    if (address.length <= 10) return address;
-    return `${address.slice(0, 6)}...${address.slice(-4)}`;
-  };
-
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
     toast.success("Address copied to clipboard");
-  };
-
-  const getExplorerUrl = (blockchain: string, address: string) => {
-    const baseUrl = BLOCK_EXPLORERS[blockchain];
-    if (!baseUrl) return "#";
-    return `${baseUrl}/address/${address}`;
   };
 
   const exportToCSV = () => {

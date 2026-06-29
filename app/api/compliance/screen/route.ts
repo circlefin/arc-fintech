@@ -16,29 +16,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@/lib/supabase/server';
+import { NextResponse } from 'next/server';
 import {
   screenAddress,
   formatComplianceResponse,
   mapComplianceResult,
 } from '@/lib/compliance/utils';
 import { ComplianceCheckRequest } from '@/types/compliance';
+import { withAuth } from '@/lib/api/with-auth';
 
-export async function POST(req: NextRequest) {
+export const POST = withAuth(async (req, { user, supabase }) => {
   try {
-    const supabase = await createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-
-    if (!user) {
-      return NextResponse.json(
-        { error: 'Unauthorized' },
-        { status: 401 }
-      );
-    }
-
     const body: ComplianceCheckRequest = await req.json();
     const { address, chain } = body;
 
@@ -81,15 +69,17 @@ export async function POST(req: NextRequest) {
   } catch (error) {
     console.error('Compliance screening error:', error);
 
-    // Return a graceful error response
+    // Return a graceful error response. We deliberately use ERROR (not PASS)
+    // so that callers cannot mistake a screening failure for an approval; the
+    // shared `shouldBlockTransfer()` helper treats ERROR as blocking.
     return NextResponse.json(
       {
         success: false,
-        result: 'PASS',
-        message: 'Compliance screening temporarily unavailable. Proceeding with caution.',
+        result: 'ERROR',
+        message: 'Compliance screening is currently unavailable. Please retry.',
         error: error instanceof Error ? error.message : 'Unknown error',
       },
-      { status: 500 }
+      { status: 503 }
     );
   }
-}
+});

@@ -16,82 +16,51 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { NextRequest, NextResponse } from "next/server";
-import { BridgeKit } from "@circle-fin/bridge-kit";
-import { createCircleWalletsAdapter } from "@circle-fin/adapter-circle-wallets";
-import { circleDeveloperSdk } from "@/lib/circle/developer-controlled-wallets-client";
-import { createClient } from "@/lib/supabase/server";
+import { NextResponse } from "next/server";
+import { z } from "zod";
+import { getAppKit, getCircleWalletsAdapter } from "@/lib/circle/app-kit";
+import { assertWalletsOwnedByUser } from "@/lib/api/ownership";
+import { validateJsonBody, blockchainSchema } from "@/lib/api/validate";
+import { APP_KIT_CHAIN_BY_BLOCKCHAIN } from "@/lib/constants/chains";
+import { withAuth } from "@/lib/api/with-auth";
 
-// Map the blockchain identifiers used in the app to Bridge Kit supported chains
-const CHAIN_MAPPING: Record<string, string> = {
-  "ETH-SEPOLIA": "Ethereum_Sepolia",
-  "AVAX-FUJI": "Avalanche_Fuji",
-  "BASE-SEPOLIA": "Base_Sepolia",
-  "ARC-TESTNET": "Arc_Testnet"
-};
+// Allow this handler to run for up to 60s — App Kit FAST transfers
+// finish in 1-3 minutes but most testnet flows complete inside the budget,
+// and any longer outcome is reported back via webhook + the tx row update.
+export const maxDuration = 60;
 
-export async function POST(request: NextRequest) {
+const bodySchema = z.object({
+  sourceWalletId: z.string().min(1),
+  sourceChain: blockchainSchema,
+  destinationWalletId: z.string().min(1),
+  destinationChain: blockchainSchema,
+  amount: z
+    .union([z.string(), z.number()])
+    .transform((v) => (typeof v === "string" ? Number(v) : v))
+    .refine((n) => Number.isFinite(n) && n > 0, "Amount must be positive"),
+  transferSpeed: z.enum(["FAST", "SLOW"]).default("SLOW"),
+});
+
+export const POST = withAuth(async (request, { user, supabase }) => {
   try {
-    const supabase = await createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-
-    if (!user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
-    const body = await request.json();
+    const parsed = await validateJsonBody(request, bodySchema);
+    if (!parsed.ok) return parsed.response;
     const {
       sourceWalletId,
       sourceChain,
       destinationWalletId,
       destinationChain,
-      amount,
-      transferSpeed = "SLOW",
-    } = body;
+      amount: amountNum,
+      transferSpeed,
+    } = parsed.data;
 
-    // Validate required fields
-    if (
-      !sourceWalletId ||
-      !sourceChain ||
-      !destinationWalletId ||
-      !destinationChain ||
-      !amount
-    ) {
-      return NextResponse.json(
-        { error: "Missing required fields" },
-        { status: 400 }
-      );
-    }
-
-    // Validate amount
-    const amountNum = parseFloat(amount);
-    if (isNaN(amountNum) || amountNum <= 0) {
-      return NextResponse.json(
-        { error: "Invalid amount" },
-        { status: 400 }
-      );
-    }
-
-    // Validate transfer speed - Bridge Kit only accepts "FAST" or "SLOW"
-    // "INSTANT" is for Gateway transfers, not CCTP bridge transfers
-    if (transferSpeed !== "FAST" && transferSpeed !== "SLOW") {
-      return NextResponse.json(
-        { 
-          error: "Invalid transfer speed",
-          message: `Transfer speed must be "FAST" or "SLOW". Received: "${transferSpeed}". Note: "INSTANT" transfers should use Gateway API instead.`,
-        },
-        { status: 400 }
-      );
-    }
-
-    // Bridge Kit expects amount in human-readable decimal format
+    // App Kit expects amount in human-readable decimal format
     const amountString = amountNum.toFixed(2);
+    let estimatedBridgeFee = 0;
 
-    // Map chains to Bridge Kit format
-    const bridgeSourceChain = CHAIN_MAPPING[sourceChain];
-    const bridgeDestChain = CHAIN_MAPPING[destinationChain];
+    // Map chains to App Kit format
+    const bridgeSourceChain = APP_KIT_CHAIN_BY_BLOCKCHAIN[sourceChain];
+    const bridgeDestChain = APP_KIT_CHAIN_BY_BLOCKCHAIN[destinationChain];
 
     if (!bridgeSourceChain || !bridgeDestChain) {
       return NextResponse.json(
@@ -100,43 +69,32 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Get source wallet address
-    const sourceWalletResponse = await circleDeveloperSdk.getWallet({
-      id: sourceWalletId,
-    });
-
-    if (!sourceWalletResponse.data?.wallet?.address) {
+    // Confirm both wallet IDs belong to the authenticated user before we
+    // execute any bridge operation against them.
+    const owned = await assertWalletsOwnedByUser(supabase, user.id, [
+      sourceWalletId,
+      destinationWalletId,
+    ]);
+    if (!owned) {
       return NextResponse.json(
-        { error: "Source wallet not found" },
+        { error: "Wallet not found" },
         { status: 404 }
       );
     }
 
-    const sourceAddress = sourceWalletResponse.data.wallet.address;
+    const sourceAddress =
+      owned.find((w) => w.circle_wallet_id === sourceWalletId)?.address;
+    const destAddress =
+      owned.find((w) => w.circle_wallet_id === destinationWalletId)?.address;
 
-    // Get destination wallet address
-    const destWalletResponse = await circleDeveloperSdk.getWallet({
-      id: destinationWalletId,
-    });
-
-    if (!destWalletResponse.data?.wallet?.address) {
+    if (!sourceAddress || !destAddress) {
       return NextResponse.json(
-        { error: "Destination wallet not found" },
+        { error: "Wallet not found" },
         { status: 404 }
       );
     }
 
-    const destAddress = destWalletResponse.data.wallet.address;
-
-    // Validate environment variables
-    if (!process.env.CIRCLE_API_KEY || !process.env.CIRCLE_ENTITY_SECRET) {
-      return NextResponse.json(
-        { error: "Circle API credentials not configured" },
-        { status: 500 }
-      );
-    }
-
-    console.log(`Using Bridge Kit for ${transferSpeed} transfer: ${amountNum} USDC from ${sourceChain} to ${destinationChain}`);
+    console.log(`Using App Kit for ${transferSpeed} transfer: ${amountNum} USDC from ${sourceChain} to ${destinationChain}`);
 
     // Minimum transfer amount validation
     // FAST transfers have higher fees that can exceed very small amounts
@@ -154,31 +112,26 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Initialize Bridge Kit
-    const kit = new BridgeKit();
-
-    // Create Circle Wallets adapter
-    const adapter = createCircleWalletsAdapter({
-      apiKey: process.env.CIRCLE_API_KEY,
-      entitySecret: process.env.CIRCLE_ENTITY_SECRET,
-    });
+    const kit = getAppKit();
+    const adapter = getCircleWalletsAdapter();
+    const forwarderDestination = {
+      chain: bridgeDestChain,
+      recipientAddress: destAddress,
+      useForwarder: true as const,
+    };
 
     // Validate the transfer parameters early by running an estimate
     // This catches errors like insufficient balance before we commit to the transfer
-    // However, note that estimate may not always catch destination chain gas issues
+    // However, note that estimate may not always catch relay/runtime execution issues
     try {
       console.log("Validating transfer parameters...");
-      const estimateResult = await kit.estimate({
+      const estimateResult = await kit.estimateBridge({
         from: {
           adapter,
-          chain: bridgeSourceChain as any,
+          chain: bridgeSourceChain,
           address: sourceAddress,
         },
-        to: {
-          adapter,
-          chain: bridgeDestChain as any,
-          address: destAddress,
-        },
+        to: forwarderDestination,
         amount: amountString,
         config: {
           transferSpeed: transferSpeed as "FAST" | "SLOW",
@@ -192,6 +145,15 @@ export async function POST(request: NextRequest) {
           const errorMsg = feeErrors.map((f: any) => f.error.message).join('; ');
           throw new Error(`Fee estimation failed: ${errorMsg}`);
         }
+
+        estimatedBridgeFee = estimateResult.fees.reduce(
+          (total: number, fee: any) => {
+            if (fee.token !== "USDC") return total;
+            const parsedFee = Number(fee.amount);
+            return Number.isFinite(parsedFee) ? total + parsedFee : total;
+          },
+          0
+        );
       }
       
       console.log("Transfer parameters validated successfully");
@@ -204,7 +166,7 @@ export async function POST(request: NextRequest) {
       
       if (validationError.code === 9002 || validationError.type === 'BALANCE') {
         errorMessage = "Insufficient gas";
-        errorDetails = `Not enough native currency to pay for gas fees. Please add funds to your wallets on both ${sourceChain} and ${destinationChain}.`;
+        errorDetails = `Not enough native currency to pay source-chain gas fees. Please fund the source wallet on ${sourceChain}.`;
       } else if (validationError.code === 9001 || validationError.message?.includes('Insufficient balance')) {
         errorMessage = "Insufficient USDC balance";
         errorDetails = `Not enough USDC in the source wallet to complete the transfer.`;
@@ -223,6 +185,8 @@ export async function POST(request: NextRequest) {
         { status: 400 }
       );
     }
+
+    const bridgeAmountString = (amountNum + estimatedBridgeFee).toFixed(6);
 
     // Log initial PENDING state to DB immediately
     const { data: txData, error: txError } = await supabase
@@ -247,182 +211,142 @@ export async function POST(request: NextRequest) {
       throw new Error(`Failed to create transaction record: ${txError.message}`);
     }
 
-    // Execute the bridge transfer in the background
-    // We don't await this because it can take several minutes (waiting for finality)
-    // which would timeout the API request.
-    // Bridge Kit handles automatic forwarding - it will automatically:
-    // 1. Burn USDC on source chain
-    // 2. Wait for and fetch attestation from Circle's Iris service
-    // 3. Mint USDC on destination chain
-    // No manual finalization needed!
-    (async () => {
-      try {
-        console.log("Starting background bridge execution with automatic forwarding...");
-
-        // Helper to serialize BigInt
-        const serializeBigInt = (obj: any): any => {
-          if (obj === null || obj === undefined) return obj;
-          if (typeof obj === 'bigint') return obj.toString();
-          if (Array.isArray(obj)) return obj.map(serializeBigInt);
-          if (typeof obj === 'object') {
-            const serialized: any = {};
-            for (const key in obj) {
-              serialized[key] = serializeBigInt(obj[key]);
-            }
-            return serialized;
-          }
-          return obj;
-        };
-
-        // Setup event listeners to capture txHash and track progress
-        let burnTxHash: string | null = null;
-        let mintTxHash: string | null = null;
-
-        // Listen for burn event (first step)
-        kit.on('burn' as any, async (payload: any) => {
-          console.log("Burn event received:", JSON.stringify(serializeBigInt(payload), null, 2));
-          const hash = payload?.values?.txHash || payload?.txHash || payload?.data?.txHash;
-          if (hash && !burnTxHash) {
-            burnTxHash = hash;
-            console.log(`Captured burn txHash: ${burnTxHash}`);
-            await supabase
-              .from("transactions")
-              .update({
-                tx_hash: burnTxHash,
-                status: "PENDING",
-              })
-              .eq("id", txData.id);
-          }
-        });
-
-        // Listen for attestation fetch event (shows automatic forwarding is working)
-        kit.on('attestation' as any, async (payload: any) => {
-          console.log("Attestation event received (automatic forwarding):", JSON.stringify(serializeBigInt(payload), null, 2));
-        });
-
-        // Listen for mint event (final step - automatic forwarding completed it!)
-        kit.on('mint' as any, async (payload: any) => {
-          console.log("Mint event received (automatic forwarding completed):", JSON.stringify(serializeBigInt(payload), null, 2));
-          const hash = payload?.values?.txHash || payload?.txHash || payload?.data?.txHash;
-          if (hash) {
-            mintTxHash = hash;
-            console.log(`Captured mint txHash: ${mintTxHash}`);
-          }
-        });
-
-        // Execute the bridge transfer - Bridge Kit handles everything automatically
-        const result = await kit.bridge({
-          from: {
-            adapter,
-            chain: bridgeSourceChain as any,
-            address: sourceAddress,
-          },
-          to: {
-            adapter,
-            chain: bridgeDestChain as any,
-            address: destAddress,
-            useForwarder: true, // Enable Circle Forwarding Service for automatic attestation and minting
-          } as any, // Type assertion needed for useForwarder in Bridge Kit 1.1.2
-          amount: amountString,
-          config: {
-            transferSpeed: transferSpeed as "FAST" | "SLOW",
-          },
-        });
-
-        console.log("Bridge Kit transfer completed with automatic forwarding!");
-        console.log("Result:", JSON.stringify(serializeBigInt(result), null, 2));
-
-        // Extract transaction hashes from result
-        if (!burnTxHash && result.steps && Array.isArray(result.steps)) {
-          const burnStep = result.steps.find((step: any) => step.name === 'burn');
-          if (burnStep?.txHash) {
-            burnTxHash = burnStep.txHash;
-          }
+    // Execute the bridge transfer synchronously and respond when it
+    // resolves (or fails). App Kit's forwarder handles burn ->
+    // attestation -> mint, so on success the row is COMPLETE before we
+    // return; on a transient timeout we surface 202 PENDING and the row
+    // stays PENDING for the webhook / monitor poll to advance.
+    const serializeBigInt = (obj: any): any => {
+      if (obj === null || obj === undefined) return obj;
+      if (typeof obj === "bigint") return obj.toString();
+      if (Array.isArray(obj)) return obj.map(serializeBigInt);
+      if (typeof obj === "object") {
+        const serialized: any = {};
+        for (const key in obj) {
+          serialized[key] = serializeBigInt(obj[key]);
         }
+        return serialized;
+      }
+      return obj;
+    };
 
-        // Determine final status based on Bridge Kit result
-        let finalStatus: string;
-        if (result.state === 'success') {
-          // Bridge Kit completed the entire flow including automatic minting
-          finalStatus = 'COMPLETE';
-          console.log("Transfer completed successfully with automatic forwarding!");
-        } else if (result.state === 'error') {
-          finalStatus = 'FAILED';
-          console.error("Transfer failed:", result);
-        } else {
-          // Shouldn't happen, but keep as pending if state is unclear
-          finalStatus = 'PENDING';
-        }
+    let burnTxHash: string | null = null;
+    let mintTxHash: string | null = null;
+    const extractTxHash = (payload: any): string | null =>
+      payload?.values?.txHash ??
+      payload?.txHash ??
+      payload?.data?.txHash ??
+      payload?.values?.forwardTxHash ??
+      payload?.data?.forwardTxHash ??
+      payload?.values?.attestation?.forwardTxHash ??
+      payload?.data?.attestation?.forwardTxHash ??
+      null;
 
-        // Update DB with final result
-        const { error: updateError } = await supabase
-          .from("transactions")
-          .update({
-            tx_hash: burnTxHash,
-            status: finalStatus,
-          })
-          .eq("id", txData.id);
-
-        if (updateError) {
-          console.error("Failed to update transaction in background:", updateError);
-        }
-
-      } catch (error: any) {
-        console.error("Background rebalance error:", error);
-        
-        // Parse error and provide better logging
-        let errorReason = "Unknown error";
-        let detailedMessage = "";
-        
-        if (error.code === 9002 || error.type === 'BALANCE') {
-          errorReason = "Insufficient gas";
-          // Try to extract which chain has insufficient gas
-          const errorMsg = error.message || "";
-          if (errorMsg.includes('Avalanche Fuji')) {
-            detailedMessage = "Insufficient gas on Avalanche Fuji (destination chain). Please add AVAX to the destination wallet.";
-          } else if (errorMsg.includes('Arc')) {
-            detailedMessage = "Insufficient gas on Arc Testnet (source chain). Please add native currency to the source wallet.";
-          } else if (errorMsg.includes('Ethereum')) {
-            detailedMessage = "Insufficient gas on Ethereum. Please add ETH to the wallet.";
-          } else if (errorMsg.includes('Base')) {
-            detailedMessage = "Insufficient gas on Base. Please add ETH to the wallet.";
-          } else {
-            detailedMessage = "Insufficient gas on source or destination chain. Please ensure both wallets have sufficient native currency for gas fees.";
-          }
-        } else if (error.code === 9001) {
-          errorReason = "Insufficient USDC balance";
-          detailedMessage = "Not enough USDC in the source wallet.";
-        } else if (error.message) {
-          errorReason = error.message;
-          detailedMessage = error.message;
-        }
-        
-        console.error(`Transfer failed: ${errorReason}`, detailedMessage || error);
-        
-        // Update DB to failed with error info
+    kit.on("bridge.burn", async (payload: any) => {
+      const hash = extractTxHash(payload);
+      if (hash && !burnTxHash) {
+        burnTxHash = hash;
         await supabase
           .from("transactions")
-          .update({ 
-            status: "FAILED"
-            // Note: We could add an error_message column to store detailedMessage
-          })
+          .update({ tx_hash: burnTxHash, status: "PENDING" })
           .eq("id", txData.id);
       }
-    })();
-
-    // Return success immediately to client
-    return NextResponse.json({
-      success: true,
-      result: {
-        amount: amountNum.toString(),
-        txHash: null,
-        status: "PENDING",
-        state: "initiated",
-        message: "Transfer initiated in background. Please check dashboard for updates.",
-      },
     });
+
+    kit.on("bridge.mint", async (payload: any) => {
+      const hash = extractTxHash(payload);
+      if (hash) mintTxHash = hash;
+    });
+
+    try {
+      const result = await kit.bridge({
+        from: {
+          adapter,
+          chain: bridgeSourceChain,
+          address: sourceAddress,
+        },
+        to: forwarderDestination,
+        amount: bridgeAmountString,
+        config: {
+          transferSpeed: transferSpeed as "FAST" | "SLOW",
+        },
+      });
+
+      if (!burnTxHash && result.steps && Array.isArray(result.steps)) {
+        const burnStep = result.steps.find((step: any) => step.name === "burn");
+        burnTxHash = extractTxHash(burnStep);
+      }
+
+      // Forwarder-only destinations may surface completion hash on mint or
+      // attestation-oriented steps instead of a traditional destination mint tx.
+      if (!mintTxHash && result.steps && Array.isArray(result.steps)) {
+        const forwarderStep = result.steps.find((step: any) =>
+          ["mint", "fetchAttestation", "reAttest"].includes(step?.name)
+        );
+        mintTxHash = extractTxHash(forwarderStep);
+      }
+
+      const finalStatus =
+        result.state === "success"
+          ? "COMPLETE"
+          : result.state === "error"
+            ? "FAILED"
+            : "PENDING";
+
+      const { error: updateError } = await supabase
+        .from("transactions")
+        .update({ tx_hash: burnTxHash, status: finalStatus })
+        .eq("id", txData.id);
+
+      if (updateError) {
+        console.error("Failed to update transaction:", updateError);
+      }
+
+      return NextResponse.json({
+        success: result.state === "success",
+        result: {
+          amount: amountNum.toString(),
+          txHash: burnTxHash,
+          mintTxHash: mintTxHash || undefined,
+          status: finalStatus,
+          state: result.state,
+          details: serializeBigInt(result),
+        },
+      });
+    } catch (bridgeError: any) {
+      console.error("Bridge execution error:", bridgeError);
+
+      // Map common App Kit errors to friendlier messages.
+      let userMessage = bridgeError.message || "Bridge transfer failed";
+      if (bridgeError.code === 9002 || bridgeError.type === "BALANCE") {
+        userMessage =
+          "Insufficient source-chain gas. Ensure the source wallet has native currency for gas fees.";
+      } else if (bridgeError.code === 9001) {
+        userMessage = "Not enough USDC in the source wallet.";
+      }
+
+      await supabase
+        .from("transactions")
+        .update({ status: "FAILED", tx_hash: burnTxHash })
+        .eq("id", txData.id);
+
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Bridge transfer failed",
+          message: userMessage,
+          code: bridgeError.code,
+          type: bridgeError.type,
+          txId: txData.id,
+        },
+        { status: 502 }
+      );
+    }
   } catch (error: any) {
     console.error("Rebalance error:", error);
-    return NextResponse.json({ error: error.message || "Internal Error" }, { status: 500 });
+    return NextResponse.json(
+      { error: error.message || "Internal Error" },
+      { status: 500 }
+    );
   }
-}
+});
