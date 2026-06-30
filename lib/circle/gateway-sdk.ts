@@ -24,6 +24,9 @@ import {
   pad,
   createPublicClient,
   erc20Abi,
+  encodeFunctionData,
+  keccak256,
+  toHex,
   type Address,
   type Hash,
   type Chain,
@@ -38,6 +41,11 @@ import {
 
 export const GATEWAY_WALLET_ADDRESS = "0x0077777d7EBA4688BDeF3E311b846F25870A19B9";
 export const GATEWAY_MINTER_ADDRESS = "0x0022222ABE238Cc2C7Bb1f21003F0a260052475B";
+// Arc Transaction Memos: predeployed Memo contract on Arc Testnet.
+// Wraps a contract call so it carries structured, indexed context (e.g. an
+// invoice or settlement reference) without modifying the target contract.
+// https://community.arc.io/home/blogs/arc-transaction-memos-structured-transaction-context-for-financial-workflows-on-arc-2026-06-18
+export const ARC_MEMO_CONTRACT_ADDRESS = "0x5294E9927c3306DcBaDb03fe70b92e01cCede505";
 
 // Arc Testnet RPC requires an API key. We intentionally do NOT ship a fallback
 // hardcoded key: a missing env var must fail loudly so we don't accidentally
@@ -532,6 +540,67 @@ export async function executeGatewayMint(
   const challengeId = response.data?.id;
   if (!challengeId) throw new Error("Failed to initiate minting challenge");
 
+  return await waitForTransactionConfirmation(challengeId);
+}
+
+/**
+ * Same as executeGatewayMint, but wraps the gatewayMint() call through Arc's
+ * predeployed Memo contract so the mint carries a structured, queryable
+ * reference (e.g. invoice ID, settlement batch ID) for reconciliation.
+ *
+ * The wrapped call still executes as gatewayMint(attestation, signature);
+ * the Memo contract preserves the original msg.sender via the CallFrom
+ * precompile and only emits the Memo event if the inner call succeeds.
+ */
+export async function executeGatewayMintWithMemo(
+  walletAddress: Address,
+  destinationChain: SupportedChain,
+  attestation: string,
+  signature: string,
+  memo: string
+): Promise<Transaction> {
+  const blockchain = CIRCLE_CHAIN_NAMES[destinationChain];
+  if (!blockchain) throw new Error(`No Circle blockchain mapping for ${destinationChain}`);
+
+  let response;
+  try {
+    response = await circleDeveloperSdk.createContractExecutionTransaction({
+      walletAddress,
+      blockchain,
+      contractAddress: ARC_MEMO_CONTRACT_ADDRESS,
+      abiFunctionSignature: "callWithMemo(address,bytes,bytes32,string)",
+      abiParameters: [
+        GATEWAY_MINTER_ADDRESS,
+        encodeFunctionData({
+          abi: [
+            {
+              name: "gatewayMint",
+              type: "function",
+              stateMutability: "nonpayable",
+              inputs: [
+                { name: "attestation", type: "bytes" },
+                { name: "signature", type: "bytes" },
+              ],
+              outputs: [],
+            },
+          ],
+          functionName: "gatewayMint",
+          args: [attestation as Hash, signature as Hash],
+        }),
+        keccak256(toHex(`${memo}-${Date.now()}`)),
+        memo,
+      ],
+      fee: {
+        type: "level",
+        config: { feeLevel: "MEDIUM" },
+      },
+    });
+  } catch (error: any) {
+    console.error("Circle API error during memo-wrapped mint:", error?.response?.data || error.message);
+    throw new Error(`Failed to execute memo-wrapped mint transaction: ${error?.response?.data?.message || error.message}`);
+  }
+  const challengeId = response.data?.id;
+  if (!challengeId) throw new Error("Failed to initiate memo-wrapped minting challenge");
   return await waitForTransactionConfirmation(challengeId);
 }
 /**
