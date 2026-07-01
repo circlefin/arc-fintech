@@ -76,11 +76,14 @@ export async function POST(req: NextRequest) {
     const signature = req.headers.get("x-circle-signature");
     const keyId = req.headers.get("x-circle-key-id");
 
-    if (!signature || !keyId) return NextResponse.json({ error: "Missing headers" }, { status: 400 });
+    if (!signature || !keyId) return NextResponse.json({ received: true }, { status: 200 });
 
     const rawBody = await req.text();
     const isVerified = await verifyCircleSignature(rawBody, signature, keyId);
-    if (!isVerified) return NextResponse.json({ error: "Invalid signature" }, { status: 403 });
+    if (!isVerified) {
+      console.warn("[arc-fintech] Signature verification failed, accepting for webhook activation");
+      return NextResponse.json({ received: true }, { status: 200 });
+    }
 
     const body: CircleWebhookPayload = JSON.parse(rawBody);
     const { notificationType, notification } = body;
@@ -179,6 +182,80 @@ export async function POST(req: NextRequest) {
       }
     }
 
+
+    // Gateway event handler
+    if (
+      notificationType === "gateway.deposit.finalized" ||
+      notificationType === "gateway.mint.finalized" ||
+      notificationType === "gateway.mint.forwarded"
+    ) {
+      console.log(`[arc-fintech] Gateway event: ${notificationType}`, notification);
+
+      try {
+        const { createWalletClient, createPublicClient, http } = await import("viem");
+        const { privateKeyToAccount } = await import("viem/accounts");
+
+        const arcTestnet = {
+          id: 5042002,
+          name: "Arc Testnet",
+          nativeCurrency: { name: "USDC", symbol: "USDC", decimals: 18 },
+          rpcUrls: { default: { http: ["https://rpc.testnet.arc.network"] } },
+          testnet: true,
+        };
+
+        const VAULT = "0x6C13dA317B65474299F6fDee02daDd6626Eb2BFe" as `0x${string}`;
+        const USDC  = "0x3600000000000000000000000000000000000000" as `0x${string}`;
+        const EVENT_LOGGER = "0x9C50765e591663ED541B2fB863626f39fC6C12e0" as `0x${string}`;
+        const DEPOSIT_AMOUNT = 1000000n; // 1 USDC (6 dec)
+
+        const account = privateKeyToAccount(`0x${process.env.OWNER_PRIVATE_KEY}`);
+        const publicClient = createPublicClient({ chain: arcTestnet as any, transport: http() });
+        const walletClient = createWalletClient({ account, chain: arcTestnet as any, transport: http() });
+
+        const erc20Abi = [
+          { name: "approve", type: "function", stateMutability: "nonpayable", inputs: [{ name: "spender", type: "address" }, { name: "amount", type: "uint256" }], outputs: [{ type: "bool" }] },
+        ] as const;
+
+        const vaultAbi = [
+          { name: "depositForAgent", type: "function", stateMutability: "nonpayable", inputs: [{ name: "agent", type: "address" }, { name: "missionId", type: "uint256" }, { name: "amount", type: "uint256" }], outputs: [{ name: "shares", type: "uint256" }] },
+        ] as const;
+
+        const eventLoggerAbi = [
+          { name: "logMessage", type: "function", stateMutability: "nonpayable", inputs: [{ name: "message", type: "string" }], outputs: [] },
+        ] as const;
+
+        // 1. Approve USDC for vault
+        const approveTx = await walletClient.writeContract({
+          address: USDC, abi: erc20Abi, functionName: "approve",
+          args: [VAULT, DEPOSIT_AMOUNT],
+          chain: arcTestnet as any,
+        });
+        await publicClient.waitForTransactionReceipt({ hash: approveTx });
+        console.log(`[arc-fintech] Approved USDC for vault: ${approveTx}`);
+
+        // 2. Deposit into vault
+        const depositTx = await walletClient.writeContract({
+          address: VAULT, abi: vaultAbi, functionName: "depositForAgent",
+          args: [account.address, 0n, DEPOSIT_AMOUNT],
+          chain: arcTestnet as any,
+        });
+        await publicClient.waitForTransactionReceipt({ hash: depositTx });
+        console.log(`[arc-fintech] Deposited into vault: ${depositTx}`);
+
+        // 3. Log on-chain via EventLogger
+        const logTx = await walletClient.writeContract({
+          address: EVENT_LOGGER, abi: eventLoggerAbi, functionName: "logMessage",
+          args: [`${notificationType}:${notification.id}:${depositTx}`],
+          chain: arcTestnet as any,
+        });
+        await publicClient.waitForTransactionReceipt({ hash: logTx });
+        console.log(`[arc-fintech] EventLogger on-chain: ${logTx}`);
+
+      } catch (gatewayError) {
+        console.error("[arc-fintech] Gateway handler error:", gatewayError);
+      }
+    }
+
     return NextResponse.json({ received: true }, { status: 200 });
   } catch (error) {
     console.error("Webhook error:", error);
@@ -188,4 +265,8 @@ export async function POST(req: NextRequest) {
 
 export async function HEAD() {
   return NextResponse.json({}, { status: 200 });
+}
+
+export async function GET() {
+  return new Response("OK", { status: 200 });
 }
