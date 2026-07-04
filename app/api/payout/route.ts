@@ -182,9 +182,6 @@ export const POST = withAuth(async (req, { user, supabase }) => {
       const destinationAppKitChain =
         APP_KIT_CHAIN_BY_BLOCKCHAIN[destinationBlockchain];
 
-      // #region agent log
-      fetch('http://127.0.0.1:7276/ingest/b6916372-e6aa-4804-b60b-f6f109736944',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'3365f4'},body:JSON.stringify({sessionId:'3365f4',runId:'pre-fix-1',hypothesisId:'H3',location:'app/api/payout/route.ts:178',message:'Gateway payout chain mapping',data:{requestedDestinationChain:destinationChain,destinationBlockchain,destinationAppKitChain:destinationAppKitChain ?? null},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
 
       if (!destinationAppKitChain) {
         return NextResponse.json(
@@ -237,9 +234,6 @@ export const POST = withAuth(async (req, { user, supabase }) => {
         );
       }
 
-      // #region agent log
-      fetch('http://127.0.0.1:7276/ingest/b6916372-e6aa-4804-b60b-f6f109736944',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'3365f4'},body:JSON.stringify({sessionId:'3365f4',runId:'pre-fix-2',hypothesisId:'H5',location:'app/api/payout/route.ts:230',message:'Gateway signer/depositor split',data:{gatewaySignerAddressCount:gatewaySignerAddresses.length,selectedSignerAddress:`${gatewaySignerAddresses[0].slice(0,6)}...${gatewaySignerAddresses[0].slice(-4)}`,nonSignerAddressCount:nonGatewaySignerAddresses.size},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
 
       const { data: gatewayDeposits, error: gatewayDepositsError } =
         await supabase
@@ -273,9 +267,6 @@ export const POST = withAuth(async (req, { user, supabase }) => {
         )
       );
 
-      // #region agent log
-      fetch('http://127.0.0.1:7276/ingest/b6916372-e6aa-4804-b60b-f6f109736944',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'3365f4'},body:JSON.stringify({sessionId:'3365f4',runId:'pre-fix-1',hypothesisId:'H1',location:'app/api/payout/route.ts:239',message:'Gateway payout source address candidates',data:{walletCount:wallets.length,gatewaySignerWalletCount:wallets.filter((wallet)=>wallet.type==='gateway_signer').length,nonGatewaySignerAddressCount:nonGatewaySignerAddresses.size,gatewayDepositRowCount:(gatewayDeposits ?? []).length,uniqueAddressCount:uniqueAddresses.length,uniqueAddressPreview:uniqueAddresses.slice(0,3).map((address)=>`${address.slice(0,6)}...${address.slice(-4)}`)},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
 
       if (uniqueAddresses.length === 0) {
         return NextResponse.json(
@@ -439,9 +430,6 @@ export const POST = withAuth(async (req, { user, supabase }) => {
             url?: unknown;
           };
         };
-        // #region agent log
-        fetch('http://127.0.0.1:7276/ingest/b6916372-e6aa-4804-b60b-f6f109736944',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'3365f4'},body:JSON.stringify({sessionId:'3365f4',runId:'pre-fix-1',hypothesisId:'H4',location:'app/api/payout/route.ts:329',message:'Gateway spend error details',data:{code:err?.code ?? null,type:err?.type ?? null,message:typeof err?.message==='string' ? err.message : String(err?.message ?? ''),shortMessage:typeof err?.shortMessage==='string' ? err.shortMessage : null,details:typeof err?.details==='string' ? err.details : null,causeCode:err?.cause?.code ?? null,causeStatus:err?.cause?.status ?? null,causeMethod:typeof err?.cause?.method === 'string' ? err.cause.method : null,causeUrl:typeof err?.cause?.url === 'string' ? err.cause.url : null},timestamp:Date.now()})}).catch(()=>{});
-        // #endregion
         console.error("Gateway payout via unifiedBalance.spend failed:", error);
         const mappedError = getUnifiedBalancePayoutError(error);
         return NextResponse.json(
