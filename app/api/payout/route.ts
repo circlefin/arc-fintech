@@ -167,7 +167,7 @@ export const POST = withAuth(async (req, { user, supabase }) => {
 
     // Routing logic based on source type
     let sourceWallet: WalletBalance | undefined;
-    let depositorWallet: typeof wallets[0] | undefined; // Wallet that has the Gateway balance
+    let depositorAddress: Address | undefined; // EOA that holds the Gateway balance (burn source)
     let strategy: "same-chain" | "gateway" = "same-chain";
     let estimatedFee = 0.50;
     let estimatedTime = 30;
@@ -234,6 +234,8 @@ export const POST = withAuth(async (req, { user, supabase }) => {
         estimatedFee = 2.01;
         estimatedTime = 60;
         useGateway = true;
+        // The selected wallet is the EOA whose Gateway balance will be burned
+        depositorAddress = selectedWallet.address as Address;
       }
 
       console.log(`User selected wallet: ${sourceWallet.walletId} on ${sourceWallet.chain}`);
@@ -577,6 +579,7 @@ export const POST = withAuth(async (req, { user, supabase }) => {
         strategy = "gateway";
         estimatedFee = 2.01;
         estimatedTime = 60;
+        depositorAddress = eoaAddressWithBalance;
         console.log(`Auto-selected Gateway from ${bestSourceChain}. Balance: ${Number(maxGatewayBalance) / 1_000_000} USDC from EOA ${eoaAddressWithBalance}`);
       }
     }
@@ -591,14 +594,25 @@ export const POST = withAuth(async (req, { user, supabase }) => {
       console.log(`Initiating Gateway transfer from ${sourceWallet.chain} to ${destinationChain}`);
       
       // Step 1: Burn with EOA signature
-      // Use the depositor wallet address (the one that has the Gateway balance)
+      // Use the depositor address (the EOA that holds the Gateway balance)
+      if (!depositorAddress) {
+        return NextResponse.json(
+          {
+            error: "No Gateway depositor address resolved",
+            userMessage:
+              "Could not determine which wallet holds the Gateway balance for this transfer. Please retry or select a source wallet explicitly.",
+          },
+          { status: 500 }
+        );
+      }
+
       const { transferId, attestation, attestationSignature } = await signAndSubmitGatewayBurnIntent(
         user.id,
         amountInAtomicUnits,
         sourceWallet.chain,
         destinationChain,
         recipientAddress as Address,
-        depositorWallet.address as Address // Pass the depositor address
+        depositorAddress // Pass the depositor address
       );
       
       console.log(`Burn intent submitted. Transfer ID: ${transferId}`);
