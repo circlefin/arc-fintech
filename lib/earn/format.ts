@@ -25,6 +25,7 @@ export function formatApy(decimal: number, fractionDigits = 2): string {
 export function formatCompactUsd(value: string | number): string {
   const n = typeof value === "string" ? Number(value) : value
   if (!Number.isFinite(n)) return "$0"
+  if (n === 0) return "$0"
   return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency: "USD",
