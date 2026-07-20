@@ -54,12 +54,12 @@ const arcRpcUrl = arcRpcKey
 export const arcTestnet = {
   id: 5042002,
   name: 'Arc Testnet',
-  nativeCurrency: { name: 'USD Coin', symbol: 'USDC', decimals: 6 },
+  nativeCurrency: { name: 'USDC', symbol: 'USDC', decimals: 18 },
   rpcUrls: {
     default: { http: [arcRpcUrl] },
   },
   blockExplorers: {
-    default: { name: 'Explorer', url: 'https://explorer.arc.testnet.circle.com' },
+    default: { name: 'Arcscan', url: 'https://testnet.arcscan.app' },
   },
   testnet: true,
 } as const satisfies Chain;
