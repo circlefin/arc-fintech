@@ -16,6 +16,11 @@ import {
   SDK_CHAIN_BY_BLOCKCHAIN,
   type AppKitChain,
 } from "@/lib/constants/chains";
+import {
+  USDC_AMOUNT_PATTERN,
+  formatUsdcAtomicUnits,
+  parseUsdcAmountToAtomicUnits,
+} from "@/lib/circle/usdc-amount";
 
 export interface PayoutWalletBalance {
   walletId: string;
@@ -73,34 +78,9 @@ type CircleWalletsAdapterProvider =
   | (() => CircleWalletsAdapter);
 
 const ZERO_BIGINT = BigInt(0);
-const USDC_ATOMIC_MULTIPLIER = BigInt(1_000_000);
-const USDC_AMOUNT_PATTERN = /^\d+(?:\.\d{1,6})?$/;
 
 function normalizeAddress(value: string): string {
   return value.trim().toLowerCase();
-}
-
-function parseUsdcAmountToAtomicUnits(value: string): bigint {
-  const normalized = value.trim();
-  if (!USDC_AMOUNT_PATTERN.test(normalized)) {
-    throw new Error(`Invalid USDC amount: ${value}`);
-  }
-
-  const [whole, fraction = ""] = normalized.split(".");
-  const paddedFraction = `${fraction}000000`.slice(0, 6);
-  return BigInt(whole) * USDC_ATOMIC_MULTIPLIER + BigInt(paddedFraction);
-}
-
-function formatUsdcAtomicUnits(value: bigint): string {
-  const whole = value / USDC_ATOMIC_MULTIPLIER;
-  const fraction = value % USDC_ATOMIC_MULTIPLIER;
-
-  if (fraction === ZERO_BIGINT) {
-    return whole.toString();
-  }
-
-  const fractionDigits = fraction.toString().padStart(6, "0").replace(/0+$/, "");
-  return `${whole.toString()}.${fractionDigits}`;
 }
 
 function toAppKitChainIdentifier(
