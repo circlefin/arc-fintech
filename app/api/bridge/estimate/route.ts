@@ -70,8 +70,11 @@ export const POST = withAuth(async (request, { user, supabase }) => {
       amount: amountNum,
     } = parsed.data;
 
-    // App Kit expects amount in human-readable decimal format
-    const amountString = amountNum.toFixed(2);
+    // App Kit expects amount in human-readable decimal format. USDC has 6
+    // decimals, and the rebalance route bridges at toFixed(6), so estimate at
+    // the same precision — otherwise the quote prices a different amount than
+    // the transfer that follows, and sub-cent amounts estimate as "0.00".
+    const amountString = amountNum.toFixed(6);
 
     // Map chains to App Kit format. The blockchain enum guarantees these
     // lookups succeed, but keep the guard to satisfy strict type checking.
