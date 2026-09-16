@@ -52,13 +52,11 @@ import {
   CHAIN_LABEL_BY_SDK_CHAIN as CHAIN_LABELS,
 } from "@/lib/constants/chains";
 import { CURRENCIES, type Currency } from "@/lib/constants/currency";
+import {
+  formatUsdcAtomicUnits,
+  parseUsdcAmountToAtomicUnits,
+} from "@/lib/circle/usdc-amount";
 import type { Address } from "viem";
-
-function convertToSmallestUnit(amount: string): string {
-  const val = parseFloat(amount);
-  if (isNaN(val)) return "0";
-  return BigInt(Math.floor(val * 1_000_000)).toString();
-}
 
 async function getCircleWalletAddress(walletId: string): Promise<Address> {
   const response = await circleDeveloperSdk.getWallet({ id: walletId });
@@ -124,12 +122,26 @@ export const POST = withAuth(async (req, { user, supabase }) => {
       );
     }
 
-    const amountNum = parseFloat(amount);
-    if (isNaN(amountNum) || amountNum <= 0) {
+    // Parse the requested amount strictly. parseFloat would accept partially
+    // numeric input like "1USDC" (-> 1) or "1.5abc" (-> 1.5) and silently move a
+    // value the caller never wrote; parseUsdcAmountToAtomicUnits rejects anything
+    // that is not a clean non-negative six-decimal amount.
+    const amountString = typeof amount === "number" ? amount.toString() : amount;
+    let amountInAtomicUnits: bigint;
+    try {
+      amountInAtomicUnits = parseUsdcAmountToAtomicUnits(amountString);
+    } catch {
+      return NextResponse.json({ error: "Invalid amount" }, { status: 400 });
+    }
+    if (amountInAtomicUnits <= BigInt(0)) {
       return NextResponse.json({ error: "Invalid amount" }, { status: 400 });
     }
 
-    const amountInAtomicUnits = BigInt(convertToSmallestUnit(amount));
+    // Canonical string / number derived from the validated atomic units, so
+    // every downstream SDK call and the persisted amount reflect the exact value
+    // that was validated — never a re-parsed float.
+    const amountDisplay = formatUsdcAtomicUnits(amountInAtomicUnits);
+    const amountNum = Number(amountDisplay);
     const destinationChain: SupportedChain = requestedChain || "arcTestnet";
 
     // Fetch user's wallets
@@ -351,7 +363,7 @@ export const POST = withAuth(async (req, { user, supabase }) => {
         const allocationPlan = planUnifiedBalanceGatewayAllocations(
           balanceProbe.breakdown,
           uniqueAddresses,
-          amountNum.toString()
+          amountDisplay
         );
 
         if (!allocationPlan.isSufficient || allocationPlan.allocations.length === 0) {
@@ -413,7 +425,7 @@ export const POST = withAuth(async (req, { user, supabase }) => {
         }
 
         await getAppKit().unifiedBalance.estimateSpend({
-          amount: amountNum.toString(),
+          amount: amountDisplay,
           token: "USDC",
           from: fromSources,
           to: {
@@ -427,7 +439,7 @@ export const POST = withAuth(async (req, { user, supabase }) => {
         console.log(destinationAppKitChain)
 
         const spendResult = await getAppKit().unifiedBalance.spend({
-          amount: amountNum.toString(),
+          amount: amountDisplay,
           token: "USDC",
           from: fromSources,
           to: {
@@ -764,7 +776,7 @@ export const POST = withAuth(async (req, { user, supabase }) => {
           sourceBlockchain: sourceWallet.blockchain,
           sourceWalletAddress: sourceWallet.address,
           recipientAddress,
-          amount: amountNum.toString(),
+          amount: amountDisplay,
           token: transactionCurrency,
         });
 
