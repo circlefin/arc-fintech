@@ -33,17 +33,11 @@ The dashboard is organized into a set of pages, each backed by Circle APIs:
 - **Docker Desktop** (only if using the local Supabase path) — [Install Docker Desktop](https://www.docker.com/products/docker-desktop/)
 - Circle Developer Controlled Wallets **[API key](https://console.circle.com/signin)** and **[Entity Secret](https://developers.circle.com/wallets/dev-controlled/register-entity-secret)**
 - A Circle **Kit Key** — optional for Earn, but **required for Swap and Add Funds** (see [Environment Variables](#environment-variables))
-- A **Cloudsmith auth token**, required for `npm install` to succeed — `@crcl-main/onramp-kit` is a private canary package and `npm install` 404s on the `@crcl-main` scope without it (see [Getting Started](#getting-started))
+
 
 ## Getting Started
 
 1. Clone the repository and install dependencies:
-
-   `@crcl-main/onramp-kit` (used by Add Funds) is a private canary package; add this line to your **personal** `~/.npmrc` first, or `npm install` 404s on the `@crcl-main` scope:
-
-   ```
-   //npm.cloudsmith.io/circle/common-private/:_authToken=<your-cloudsmith-token>
-   ```
 
    ```bash
    git clone git@github.com:akelani-circle/fintech-starter.git
