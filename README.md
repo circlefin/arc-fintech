@@ -100,7 +100,7 @@ The dashboard is organized into a set of pages, each backed by Circle APIs:
 - Uses [Circle Gateway](https://developers.circle.com/gateway) for a unified, cross-chain USDC balance
 - Utilizes `@circle-fin/app-kit` for bridging assets across supported chains (`kit.bridge` / `kit.estimateBridge`) and for swapping USDC ⇄ EURC on Arc Testnet (`kit.swap` / `kit.estimateSwap`)
 - Uses `@circle-fin/earn-kit` to discover USDC vaults on Arc Testnet, deposit, withdraw, and track positions
-- Uses `@crcl-main/onramp-kit` for Add Funds: the server mints a single-use session (`/api/onramp/session`) for a wallet the caller owns, and the browser opens Circle's hosted onramp widget in a popup with that session. Sandbox-only — see [Environment Variables](#environment-variables)
+- Uses `@circle-fin/onramp-kit` for Add Funds: the server mints a single-use session (`/api/onramp/session`) for a wallet the caller owns, and the browser opens Circle's hosted onramp widget in a popup with that session. Sandbox-only — see [Environment Variables](#environment-variables)
 - Uses Circle's [Compliance Engine](https://developers.circle.com/w3s/compliance-engine) to screen addresses before transfers
 - [Circle webhooks](https://developers.circle.com/api-reference/webhook-endpoints) keep transaction and [Gateway](https://developers.circle.com/gateway/webhooks) state in sync (see [Webhooks & Real-Time Updates](#webhooks--real-time-updates))
 - Real-time UI updates powered by Supabase Realtime subscriptions

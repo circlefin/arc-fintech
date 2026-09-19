@@ -15,7 +15,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { createOnrampServerKit, type OnrampServerKit } from "@crcl-main/onramp-kit/server";
+import { createOnrampServerKit, type OnrampServerKit } from "@circle-fin/onramp-kit/server";
 import { createClient } from "@/lib/supabase/server";
 import { DB_BLOCKCHAIN_TO_ONRAMP_CHAIN } from "@/lib/circle/onramp-chains";
 import { ONRAMP_WIDGET_BASE_URL } from "@/lib/circle/onramp-environment";

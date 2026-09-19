@@ -23,7 +23,7 @@ import { zodResolver } from "@hookform/resolvers/zod"
 import { IconCreditCard, IconLoader, IconPlus } from "@tabler/icons-react"
 import { useForm, useWatch } from "react-hook-form"
 import { toast } from "sonner"
-import { createOnrampKit, parseOnrampSession, type OnrampSession } from "@crcl-main/onramp-kit"
+import { createOnrampKit, parseOnrampSession, type OnrampSession } from "@circle-fin/onramp-kit"
 import * as z from "zod"
 
 import { ONRAMP_WIDGET_BASE_URL } from "@/lib/circle/onramp-environment"
