@@ -40,6 +40,13 @@ import {
 } from "@/lib/api/validate";
 import { APP_KIT_CHAIN_BY_BLOCKCHAIN } from "@/lib/constants/chains";
 import { withAuth } from "@/lib/api/with-auth";
+import {
+  abandonIdempotent,
+  beginIdempotent,
+  completeIdempotent,
+  hashIdempotencyBody,
+  readIdempotencyKey,
+} from "@/lib/api/idempotency";
 
 // App Kit's `unifiedBalance.deposit` runs the approve + deposit pair through
 // Developer Controlled Wallets and waits for both to confirm. On busy testnets
@@ -58,10 +65,27 @@ const bodySchema = z.object({
 });
 
 export const POST = withAuth(async (req, { user, supabase }) => {
+  const idempotencyKey = readIdempotencyKey(req);
+  let bodyHash = "";
+  let admitted = false;
+
   try {
     const parsed = await validateJsonBody(req, bodySchema);
     if (!parsed.ok) return parsed.response;
     const { walletAddress, blockchain, amount } = parsed.data;
+
+    bodyHash = hashIdempotencyBody({ walletAddress, blockchain, amount });
+    const admission = beginIdempotent({
+      surface: "gateway.deposit",
+      userId: user.id,
+      idempotencyKey,
+      bodyHash,
+    });
+    if (admission.kind === "replay") return admission.response;
+    if (admission.kind === "conflict" || admission.kind === "in_flight") {
+      return admission.response;
+    }
+    admitted = true;
 
     // Filter by BOTH address AND blockchain to avoid multiple results — the
     // same EVM address can appear on multiple chains for the same user. RLS
@@ -76,6 +100,11 @@ export const POST = withAuth(async (req, { user, supabase }) => {
       .single();
 
     if (walletError || !wallet) {
+      abandonIdempotent({
+        surface: "gateway.deposit",
+        userId: user.id,
+        idempotencyKey,
+      });
       return NextResponse.json(
         { error: "Wallet not found or does not belong to user." },
         { status: 404 }
@@ -84,6 +113,11 @@ export const POST = withAuth(async (req, { user, supabase }) => {
 
     const appKitChain = APP_KIT_CHAIN_BY_BLOCKCHAIN[wallet.blockchain];
     if (!appKitChain) {
+      abandonIdempotent({
+        surface: "gateway.deposit",
+        userId: user.id,
+        idempotencyKey,
+      });
       return NextResponse.json(
         { error: `Unsupported blockchain type: ${wallet.blockchain}` },
         { status: 400 }
@@ -123,15 +157,39 @@ export const POST = withAuth(async (req, { user, supabase }) => {
       },
     ]);
 
-    return NextResponse.json({
+    const successBody = {
       success: true,
       txHash: result.txHash,
       explorerUrl: result.explorerUrl,
       chain: result.chain,
       amount: result.amount,
+    };
+    completeIdempotent({
+      surface: "gateway.deposit",
+      userId: user.id,
+      idempotencyKey,
+      bodyHash,
+      responseBody: successBody,
     });
+    return NextResponse.json(successBody);
   } catch (error: unknown) {
     console.error("Error in deposit:", error);
+
+    const finishError = (body: { error: string }, status: number) => {
+      // Broadcast may already have happened; cache the failure so retries
+      // with the same Idempotency-Key do not deposit again.
+      if (admitted && bodyHash) {
+        completeIdempotent({
+          surface: "gateway.deposit",
+          userId: user.id,
+          idempotencyKey,
+          bodyHash,
+          responseBody: body,
+          responseStatus: status,
+        });
+      }
+      return NextResponse.json(body, { status });
+    };
 
     // App Kit error taxonomy: BalanceError covers three distinct
     // failure modes (insufficient USDC, insufficient native gas,
@@ -145,44 +203,29 @@ export const POST = withAuth(async (req, { user, supabase }) => {
         // App Kit's own message is already user-friendly and chain-aware
         // (e.g. "Insufficient ETH on Base Sepolia to cover gas fees"),
         // so we surface it verbatim instead of a generic stand-in.
-        return NextResponse.json(
-          {
+        return finishError({
             error:
               error.message ||
               "Insufficient native gas token on the source chain.",
-          },
-          { status: 400 }
-        );
+          }, 400);
       }
       if (code === BALANCE_INSUFFICIENT_ALLOWANCE) {
-        return NextResponse.json(
-          {
+        return finishError({
             error:
               "USDC allowance too low for the Gateway contract. Try again — App Kit will re-issue the approval.",
-          },
-          { status: 400 }
-        );
+          }, 400);
       }
       // Default + BALANCE_INSUFFICIENT_TOKEN — actual USDC shortfall.
       void BALANCE_INSUFFICIENT_TOKEN;
-      return NextResponse.json(
-        { error: "Insufficient USDC balance in the selected wallet." },
-        { status: 400 }
-      );
+      return finishError({ error: "Insufficient USDC balance in the selected wallet." }, 400);
     }
 
     if (isInputError(error)) {
-      return NextResponse.json(
-        { error: error.message || "Invalid deposit request." },
-        { status: 400 }
-      );
+      return finishError({ error: error.message || "Invalid deposit request." }, 400);
     }
 
     if (isNetworkError(error)) {
-      return NextResponse.json(
-        { error: "Network error contacting the chain. Please try again." },
-        { status: 503 }
-      );
+      return finishError({ error: "Network error contacting the chain. Please try again." }, 503);
     }
 
     let errorMessage = "Internal server error";

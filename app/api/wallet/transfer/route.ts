@@ -25,6 +25,13 @@ import {
   getAppKitSendError,
   sendUsdcOnSameChainWithAppKit,
 } from "@/lib/circle/app-kit-send";
+import {
+  abandonIdempotent,
+  beginIdempotent,
+  completeIdempotent,
+  hashIdempotencyBody,
+  readIdempotencyKey,
+} from "@/lib/api/idempotency";
 
 const bodySchema = z.object({
   sourceWalletId: z.string().min(1),
@@ -37,10 +44,32 @@ const bodySchema = z.object({
 });
 
 export const POST = withAuth(async (req, { user, supabase }) => {
+  const idempotencyKey = readIdempotencyKey(req);
+  let bodyHash = "";
+  let admitted = false;
+
   try {
     const parsed = await validateJsonBody(req, bodySchema);
     if (!parsed.ok) return parsed.response;
     const { sourceWalletId, destinationAddress, amount, currency } = parsed.data;
+
+    bodyHash = hashIdempotencyBody({
+      sourceWalletId,
+      destinationAddress,
+      amount,
+      currency,
+    });
+    const admission = beginIdempotent({
+      surface: "wallet.transfer",
+      userId: user.id,
+      idempotencyKey,
+      bodyHash,
+    });
+    if (admission.kind === "replay") return admission.response;
+    if (admission.kind === "conflict" || admission.kind === "in_flight") {
+      return admission.response;
+    }
+    admitted = true;
 
     // 1. Fetch Source Wallet to get its blockchain
     const { data: sourceWallet, error: sourceError } = await supabase
@@ -51,6 +80,11 @@ export const POST = withAuth(async (req, { user, supabase }) => {
       .single();
 
     if (sourceError || !sourceWallet || !sourceWallet.blockchain) {
+      abandonIdempotent({
+        surface: "wallet.transfer",
+        userId: user.id,
+        idempotencyKey,
+      });
       return NextResponse.json(
         { error: "Source wallet not found or missing blockchain data" },
         { status: 404 }
@@ -59,6 +93,7 @@ export const POST = withAuth(async (req, { user, supabase }) => {
 
     const amountNum = amount;
 
+    // From here a broadcast may occur; do not abandon the slot on later errors.
     const sendResult = await sendUsdcOnSameChainWithAppKit({
       sourceBlockchain: sourceWallet.blockchain,
       sourceWalletAddress: sourceWallet.address,
@@ -87,22 +122,38 @@ export const POST = withAuth(async (req, { user, supabase }) => {
       console.error("Failed to log transaction to Supabase:", insertError);
     }
 
-    return NextResponse.json({
+    const successBody = {
       success: true,
       txId: sendResult.txId,
       txHash: sendResult.txHash ?? null,
+    };
+    completeIdempotent({
+      surface: "wallet.transfer",
+      userId: user.id,
+      idempotencyKey,
+      bodyHash,
+      responseBody: successBody,
     });
+    return NextResponse.json(successBody);
 
   } catch (error: unknown) {
     console.error("Transfer error:", error);
     const mappedError = getAppKitSendError(error);
-
-    return NextResponse.json(
-      {
-        error: mappedError.error,
-        userMessage: mappedError.userMessage,
-      },
-      { status: mappedError.status }
-    );
+    const errorBody = {
+      error: mappedError.error,
+      userMessage: mappedError.userMessage,
+    };
+    // Cache the failure so a retry with the same key does not broadcast again.
+    if (admitted && bodyHash) {
+      completeIdempotent({
+        surface: "wallet.transfer",
+        userId: user.id,
+        idempotencyKey,
+        bodyHash,
+        responseBody: errorBody,
+        responseStatus: mappedError.status,
+      });
+    }
+    return NextResponse.json(errorBody, { status: mappedError.status });
   }
 });
