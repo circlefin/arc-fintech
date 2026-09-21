@@ -18,7 +18,7 @@
 
 "use client"
 
-import { useState } from "react"
+import { useRef, useState } from "react"
 import { zodResolver } from "@hookform/resolvers/zod"
 import { IconArrowDown, IconLoader } from "@tabler/icons-react"
 import { useForm, useWatch } from "react-hook-form"
@@ -65,6 +65,9 @@ export function GatewayDepositDialog() {
   const [selectedWalletAddress, setSelectedWalletAddress] = useState("")
   const [selectedBlockchain, setSelectedBlockchain] = useState("")
 
+  // Stable per-intent key so a lost response + retry does not deposit twice (#50).
+  const idempotencyKeyRef = useRef<string | null>(null)
+
   const form = useForm<DepositFormValues>({
     resolver: zodResolver(depositFormSchema),
     defaultValues: {
@@ -85,9 +88,16 @@ export function GatewayDepositDialog() {
       const actualAddress = selectedWalletAddress || values.walletAddress.split('-').slice(0, -2).join('-')
       const actualBlockchain = selectedBlockchain || values.walletAddress.split('-').slice(-2).join('-')
 
+      if (!idempotencyKeyRef.current) {
+        idempotencyKeyRef.current = crypto.randomUUID()
+      }
+
       const response = await fetch("/api/gateway/deposit", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": idempotencyKeyRef.current,
+        },
         body: JSON.stringify({
           walletAddress: actualAddress,
           blockchain: actualBlockchain,
@@ -105,6 +115,7 @@ export function GatewayDepositDialog() {
         description: `Transaction Hash: ${data.txHash?.slice(0, 10)}...`,
       })
 
+      idempotencyKeyRef.current = null
       setOpen(false)
       form.reset()
 

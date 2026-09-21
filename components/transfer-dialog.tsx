@@ -18,7 +18,7 @@
 
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { IconArrowsLeftRight, IconLoader2 } from "@tabler/icons-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -73,6 +73,10 @@ export function TransferDialog() {
   const [showComplianceDetails, setShowComplianceDetails] = useState(false);
   const [showReviewWarning, setShowReviewWarning] = useState(false);
 
+  // Stable per-intent key so a lost response + Confirm retry does not
+  // broadcast a second transfer (#50).
+  const idempotencyKeyRef = useRef<string | null>(null);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -101,11 +105,17 @@ export function TransferDialog() {
     }
 
     setIsTransferring(true);
+    if (!idempotencyKeyRef.current) {
+      idempotencyKeyRef.current = crypto.randomUUID();
+    }
 
     try {
       const response = await fetch("/api/wallet/transfer", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": idempotencyKeyRef.current,
+        },
         body: JSON.stringify({
           sourceWalletId: sourceWallet.circle_wallet_id,
           destinationAddress: recipientAddress,
@@ -123,6 +133,7 @@ export function TransferDialog() {
       toast.success("Transfer initiated", {
         description: `Transferring ${amount} ${currency} on ${sourceWallet.blockchain}`,
       });
+      idempotencyKeyRef.current = null;
       setOpen(false);
       resetForm();
     } catch (error) {
@@ -136,6 +147,7 @@ export function TransferDialog() {
   };
 
   const resetForm = () => {
+    idempotencyKeyRef.current = null;
     setSourceWallet(null);
     setCurrency("USDC");
     setAmount("1");
