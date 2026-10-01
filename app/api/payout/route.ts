@@ -53,11 +53,19 @@ import {
 } from "@/lib/constants/chains";
 import { CURRENCIES, type Currency } from "@/lib/constants/currency";
 import type { Address } from "viem";
+import { parseUnits } from "viem";
 
-function convertToSmallestUnit(amount: string): string {
-  const val = parseFloat(amount);
-  if (isNaN(val)) return "0";
-  return BigInt(Math.floor(val * 1_000_000)).toString();
+/** Atomic units per USDC (6 decimals on every chain this app supports). */
+const USDC_DECIMALS = 6;
+
+/**
+ * Converts a decimal USDC string into 6-decimal atomic units.
+ *
+ * Replaces `parseFloat` + `Math.floor(val * 1_000_000)` with `parseUnits` to prevent
+ * truncation and ensure malformed strings throw immediately instead of coercing to 0.
+ */
+function convertToSmallestUnit(amount: string): bigint {
+  return parseUnits(amount, USDC_DECIMALS);
 }
 
 async function getCircleWalletAddress(walletId: string): Promise<Address> {
@@ -84,7 +92,7 @@ export const POST = withAuth(async (req, { user, supabase }) => {
       amount,
       destinationChain: requestedChain,
       sourceType = "auto",
-      sourceWalletId
+      sourceWalletId,
     } = body;
 
     if (!recipientAddress || !amount) {
@@ -94,14 +102,6 @@ export const POST = withAuth(async (req, { user, supabase }) => {
       );
     }
 
-    // A non-USDC payout is only satisfiable on a true same-chain wallet source
-    // (the `else` branch below, which calls sendUsdcOnSameChainWithAppKit
-    // directly). "auto" picks its wallet by USDC balance, and every
-    // cross-chain/"gateway" path settles through Gateway's burn/mint, which is
-    // USDC-only.
-    //
-    // Reject rather than silently downgrade: this endpoint moves money, so a
-    // request asking for EURC must never quietly send USDC instead.
     const rawCurrency = body.currency ?? "USDC";
     if (!(CURRENCIES as readonly string[]).includes(rawCurrency)) {
       return NextResponse.json(
@@ -124,15 +124,20 @@ export const POST = withAuth(async (req, { user, supabase }) => {
       );
     }
 
-    const amountNum = parseFloat(amount);
-    if (isNaN(amountNum) || amountNum <= 0) {
+    let amountInAtomicUnits: bigint;
+    try {
+      amountInAtomicUnits = convertToSmallestUnit(String(amount));
+    } catch {
       return NextResponse.json({ error: "Invalid amount" }, { status: 400 });
     }
 
-    const amountInAtomicUnits = BigInt(convertToSmallestUnit(amount));
+    if (amountInAtomicUnits <= BigInt(0)) {
+      return NextResponse.json({ error: "Invalid amount" }, { status: 400 });
+    }
+
+    const amountNum = Number(amountInAtomicUnits) / 10 ** USDC_DECIMALS;
     const destinationChain: SupportedChain = requestedChain || "arcTestnet";
 
-    // Fetch user's wallets
     const { data: wallets, error: walletsError } = await supabase
       .from("wallets")
       .select("*")
@@ -145,7 +150,6 @@ export const POST = withAuth(async (req, { user, supabase }) => {
       );
     }
 
-    // Get wallet balances
     const walletBalances: WalletBalance[] = [];
     for (const wallet of wallets) {
       const chain = BLOCKCHAIN_TO_CHAIN[wallet.blockchain];
@@ -165,18 +169,18 @@ export const POST = withAuth(async (req, { user, supabase }) => {
       }
     }
 
-    // Routing logic based on source type
     let sourceWallet: WalletBalance | undefined;
-    let depositorWallet: typeof wallets[0] | undefined; // Wallet that has the Gateway balance
     let strategy: "same-chain" | "gateway" = "same-chain";
     let estimatedFee = 0.50;
     let estimatedTime = 30;
     let useGateway = false;
 
+    let maxGatewayBalance = BigInt(0);
+    let eoaAddressWithBalance: Address | undefined;
+
     if (sourceType === "wallet" && sourceWalletId) {
-      // User selected a specific wallet
-      const selectedWallet = walletBalances.find(w => w.walletId === sourceWalletId);
-      
+      const selectedWallet = walletBalances.find((w) => w.walletId === sourceWalletId);
+
       if (!selectedWallet) {
         return NextResponse.json(
           { error: "Selected wallet not found" },
@@ -186,7 +190,6 @@ export const POST = withAuth(async (req, { user, supabase }) => {
 
       const isSameChain = selectedWallet.chain === destinationChain;
 
-      // A cross-chain wallet source routes through Gateway, which is USDC-only.
       if (requestedCurrency !== "USDC" && !isSameChain) {
         return NextResponse.json(
           {
@@ -197,11 +200,6 @@ export const POST = withAuth(async (req, { user, supabase }) => {
         );
       }
 
-      // Validate against the balance of the token we will actually send. The
-      // `walletBalances` map above is USDC-only (it drives Gateway routing), so
-      // a non-USDC payout needs its own read — otherwise a wallet holding EURC
-      // but no USDC would be rejected, and one holding USDC but no EURC would
-      // pass here only to fail inside App Kit.
       const availableBalance =
         requestedCurrency === "USDC"
           ? selectedWallet.balance
@@ -215,7 +213,7 @@ export const POST = withAuth(async (req, { user, supabase }) => {
         return NextResponse.json(
           {
             error: "Insufficient balance",
-            userMessage: `Selected wallet has insufficient ${requestedCurrency} balance. Available: ${Number(availableBalance) / 1_000_000} ${requestedCurrency}, Required: ${amountNum} ${requestedCurrency}.`
+            userMessage: `Selected wallet has insufficient ${requestedCurrency} balance. Available: ${Number(availableBalance) / 1_000_000} ${requestedCurrency}, Required: ${amountNum} ${requestedCurrency}.`,
           },
           { status: 400 }
         );
@@ -223,7 +221,6 @@ export const POST = withAuth(async (req, { user, supabase }) => {
 
       sourceWallet = selectedWallet;
 
-      // Check if it's same-chain or cross-chain
       if (isSameChain) {
         strategy = "same-chain";
         estimatedFee = 0.50;
@@ -235,12 +232,9 @@ export const POST = withAuth(async (req, { user, supabase }) => {
         estimatedTime = 60;
         useGateway = true;
       }
-
-      console.log(`User selected wallet: ${sourceWallet.walletId} on ${sourceWallet.chain}`);
     } else if (sourceType === "gateway") {
       const destinationBlockchain = CHAIN_TO_BLOCKCHAIN[destinationChain];
-      const destinationAppKitChain =
-        APP_KIT_CHAIN_BY_BLOCKCHAIN[destinationBlockchain];
+      const destinationAppKitChain = APP_KIT_CHAIN_BY_BLOCKCHAIN[destinationBlockchain];
 
       if (!destinationAppKitChain) {
         return NextResponse.json(
@@ -253,18 +247,14 @@ export const POST = withAuth(async (req, { user, supabase }) => {
         wallets
           .filter((wallet) => wallet.type !== "gateway_signer")
           .map((wallet) => wallet.address?.toLowerCase())
-          .filter(
-            (value): value is string =>
-              typeof value === "string" && value.length > 0
-          )
+          .filter((value): value is string => typeof value === "string" && value.length > 0)
       );
 
       if (nonGatewaySignerAddresses.size === 0) {
         return NextResponse.json(
           {
             error: "No Gateway balance found",
-            userMessage:
-              "No eligible non-signer wallets were found for this account.",
+            userMessage: "No eligible non-signer wallets were found for this account.",
           },
           { status: 404 }
         );
@@ -275,10 +265,7 @@ export const POST = withAuth(async (req, { user, supabase }) => {
           wallets
             .filter((wallet) => wallet.type === "gateway_signer")
             .map((wallet) => wallet.address?.toLowerCase())
-            .filter(
-              (value): value is string =>
-                typeof value === "string" && value.length > 0
-            )
+            .filter((value): value is string => typeof value === "string" && value.length > 0)
         )
       );
 
@@ -286,23 +273,21 @@ export const POST = withAuth(async (req, { user, supabase }) => {
         return NextResponse.json(
           {
             error: "No Gateway signer wallet found",
-            userMessage:
-              "Create a Gateway signer wallet before spending Gateway balance.",
+            userMessage: "Create a Gateway signer wallet before spending Gateway balance.",
           },
           { status: 404 }
         );
       }
 
-      const { data: gatewayDeposits, error: gatewayDepositsError } =
-        await supabase
-          .from("transactions")
-          .select("sender_address, recipient_address")
-          .eq("user_id", user.id)
-          .eq("type", "OUTBOUND")
-          .in("recipient_address", [
-            GATEWAY_WALLET_ADDRESS,
-            GATEWAY_WALLET_ADDRESS.toLowerCase(),
-          ]);
+      const { data: gatewayDeposits, error: gatewayDepositsError } = await supabase
+        .from("transactions")
+        .select("sender_address, recipient_address")
+        .eq("user_id", user.id)
+        .eq("type", "OUTBOUND")
+        .in("recipient_address", [
+          GATEWAY_WALLET_ADDRESS,
+          GATEWAY_WALLET_ADDRESS.toLowerCase(),
+        ]);
 
       if (gatewayDepositsError) {
         console.error("Failed to query Gateway deposit history:", gatewayDepositsError);
@@ -329,8 +314,7 @@ export const POST = withAuth(async (req, { user, supabase }) => {
         return NextResponse.json(
           {
             error: "No Gateway balance found",
-            userMessage:
-              "No eligible wallet addresses were found for this account.",
+            userMessage: "No eligible wallet addresses were found for this account.",
           },
           { status: 404 }
         );
@@ -423,9 +407,6 @@ export const POST = withAuth(async (req, { user, supabase }) => {
           },
         });
 
-        console.log(fromSources)
-        console.log(destinationAppKitChain)
-
         const spendResult = await getAppKit().unifiedBalance.spend({
           amount: amountNum.toString(),
           token: "USDC",
@@ -485,14 +466,11 @@ export const POST = withAuth(async (req, { user, supabase }) => {
         );
       }
     } else {
-      // Auto mode: Try same-chain first (optimal)
       sourceWallet = walletBalances.find(
         (w) => w.chain === destinationChain && w.balance >= amountInAtomicUnits
       );
 
       if (!sourceWallet) {
-        // No wallet on destination chain - check Gateway balance using EOA addresses
-        // Get Gateway EOA wallets to check their deposited balances
         const { data: gatewayWallets, error: gwError } = await supabase
           .from("wallets")
           .select("*")
@@ -501,43 +479,31 @@ export const POST = withAuth(async (req, { user, supabase }) => {
 
         if (gwError || !gatewayWallets || gatewayWallets.length === 0) {
           return NextResponse.json(
-            { 
+            {
               error: "No funds available",
-              userMessage: `No USDC available on ${CHAIN_LABELS[destinationChain]} and no Gateway balance. Please add funds or use a different chain.`
+              userMessage: `No USDC available on ${CHAIN_LABELS[destinationChain]} and no Gateway balance. Please add funds or use a different chain.`,
             },
             { status: 400 }
           );
         }
 
-        // Check Gateway balance for ALL unique EOA addresses
-        // We need to check all unique addresses to find which has sufficient balance
-        let maxGatewayBalance = BigInt(0);
         let bestSourceChain: SupportedChain | undefined;
-        let eoaAddressWithBalance: Address | undefined;
-
-        // Get unique EOA addresses
-        const uniqueEOAs = Array.from(new Set(gatewayWallets.map(w => w.address.toLowerCase())));
-        console.log(`Auto mode: Checking Gateway balance for ${uniqueEOAs.length} unique EOA address(es)`);
+        const uniqueEOAs = Array.from(new Set(gatewayWallets.map((w) => w.address.toLowerCase())));
 
         for (const eoaAddressStr of uniqueEOAs) {
           const eoaAddress = eoaAddressStr as Address;
-          
+
           try {
-            console.log(`  Checking Gateway balance for EOA ${eoaAddress}`);
             const gatewayBalance = await fetchGatewayBalance(eoaAddress);
-            
+
             if (gatewayBalance.balances && Array.isArray(gatewayBalance.balances)) {
               for (const bal of gatewayBalance.balances) {
-                const balanceNum = parseFloat(bal.balance);
-                const balanceInAtomicUnits = BigInt(Math.floor(balanceNum * 1_000_000));
-                
-                // Map domain to chain
+                const balanceInAtomicUnits = convertToSmallestUnit(bal.balance);
+
                 const { CHAIN_BY_DOMAIN } = await import("@/lib/circle/gateway-sdk");
                 const chainName = CHAIN_BY_DOMAIN[bal.domain];
                 const chain = chainName as SupportedChain;
-                
-                console.log(`    Balance on ${chain}: ${balanceNum} USDC`);
-                
+
                 if (balanceInAtomicUnits > maxGatewayBalance) {
                   maxGatewayBalance = balanceInAtomicUnits;
                   bestSourceChain = chain;
@@ -546,23 +512,22 @@ export const POST = withAuth(async (req, { user, supabase }) => {
               }
             }
           } catch (error) {
-            console.error(`  Error checking Gateway balance for ${eoaAddress}:`, error);
+            console.error(`Error checking Gateway balance for ${eoaAddress}:`, error);
           }
         }
 
         if (maxGatewayBalance < amountInAtomicUnits) {
           return NextResponse.json(
-            { 
+            {
               error: "Insufficient funds",
-              userMessage: `Not enough USDC. Gateway balance: ${Number(maxGatewayBalance) / 1_000_000} USDC, Required: ${amountNum} USDC.`
+              userMessage: `Not enough USDC. Gateway balance: ${Number(maxGatewayBalance) / 1_000_000} USDC, Required: ${amount} USDC.`,
             },
             { status: 400 }
           );
         }
 
-        // Use any Circle wallet for minting, but we'll use the best source chain for burning
         sourceWallet = walletBalances.length > 0 ? walletBalances[0] : undefined;
-        
+
         if (!sourceWallet) {
           return NextResponse.json(
             { error: "No wallets found" },
@@ -570,43 +535,42 @@ export const POST = withAuth(async (req, { user, supabase }) => {
           );
         }
 
-        // Override the source chain to be where the Gateway balance is
         sourceWallet.chain = bestSourceChain!;
-
         useGateway = true;
         strategy = "gateway";
         estimatedFee = 2.01;
         estimatedTime = 60;
-        console.log(`Auto-selected Gateway from ${bestSourceChain}. Balance: ${Number(maxGatewayBalance) / 1_000_000} USDC from EOA ${eoaAddressWithBalance}`);
       }
     }
 
-    // Execute transfer
     let txId: string;
     let txHash: string | undefined;
     let transactionCurrency: Currency = "USDC";
 
     if (useGateway) {
-      // Use Gateway with EOA signing (no Circle wallet needed for burn, only for mint)
-      console.log(`Initiating Gateway transfer from ${sourceWallet.chain} to ${destinationChain}`);
-      
-      // Step 1: Burn with EOA signature
-      // Use the depositor wallet address (the one that has the Gateway balance)
+      if (!sourceWallet) {
+        return NextResponse.json({ error: "Source wallet unavailable" }, { status: 500 });
+      }
+
+      if (!eoaAddressWithBalance) {
+        console.error("No EOA address with a Gateway balance was resolved for this payout");
+        return NextResponse.json(
+          { error: "No funded Gateway wallet found for the source chain" },
+          { status: 409 }
+        );
+      }
+
       const { transferId, attestation, attestationSignature } = await signAndSubmitGatewayBurnIntent(
         user.id,
         amountInAtomicUnits,
         sourceWallet.chain,
         destinationChain,
         recipientAddress as Address,
-        depositorWallet.address as Address // Pass the depositor address
+        eoaAddressWithBalance as Address
       );
-      
-      console.log(`Burn intent submitted. Transfer ID: ${transferId}`);
-            
-      // We need a Circle wallet address on the DESTINATION chain to execute the mint
-      // Find or create a Circle wallet on the destination chain
+
       const destinationBlockchain = CHAIN_TO_BLOCKCHAIN[destinationChain];
-      
+
       const { data: circleWallets } = await supabase
         .from("wallets")
         .select("*")
@@ -617,34 +581,24 @@ export const POST = withAuth(async (req, { user, supabase }) => {
 
       let circleWallet = circleWallets && circleWallets.length > 0 ? circleWallets[0] : null;
 
-      // Auto-create Circle wallet if it doesn't exist on destination chain
       if (!circleWallet) {
-        console.log(`No Circle wallet found on ${destinationChain}. Auto-creating...`);
-        
         try {
-          // Get an existing Circle wallet to extract its wallet set ID
-          const existingWallet = wallets.find(w => w.circle_wallet_id && w.type !== 'gateway_signer');
+          const existingWallet = wallets.find((w) => w.circle_wallet_id && w.type !== "gateway_signer");
           let walletSetId: string;
-          
+
           if (existingWallet) {
-            // Fetch the wallet details to get its wallet set ID
             const walletDetails = await circleDeveloperSdk.getWallet({ id: existingWallet.circle_wallet_id });
-            walletSetId = walletDetails.data?.wallet?.walletSetId || '';
-            console.log(`Using existing wallet set ID: ${walletSetId}`);
+            walletSetId = walletDetails.data?.wallet?.walletSetId || "";
           } else {
-            // No existing Circle wallets - create a new wallet set first
-            console.log("No existing Circle wallets found. Creating new wallet set...");
             const walletSetResponse = await circleDeveloperSdk.createWalletSet({ name: "Default Wallet Set" });
-            
+
             if (!walletSetResponse.data?.walletSet?.id) {
               throw new Error("Failed to create wallet set");
             }
-            
+
             walletSetId = walletSetResponse.data.walletSet.id;
-            console.log(`Created new wallet set: ${walletSetId}`);
           }
-          
-          // Create Circle wallet using the same wallet set
+
           const walletResponse = await circleDeveloperSdk.createWallets({
             blockchains: [destinationBlockchain as Blockchain],
             count: 1,
@@ -656,9 +610,7 @@ export const POST = withAuth(async (req, { user, supabase }) => {
           }
 
           const newWallet = walletResponse.data.wallets[0];
-          console.log(`Circle API created wallet: ${newWallet.id} (${newWallet.address})`);
 
-          // Store in database
           const { data: dbWallet, error: dbError } = await supabase
             .from("wallets")
             .insert([
@@ -668,30 +620,24 @@ export const POST = withAuth(async (req, { user, supabase }) => {
                 address: newWallet.address,
                 blockchain: newWallet.blockchain,
                 name: `${CHAIN_LABELS[destinationChain]} Wallet`,
-                type: 'customer', // Default wallet type for auto-created wallets
+                type: "customer",
               },
             ])
             .select()
             .single();
 
-          if (dbError) {
-            console.error("Database insert error:", dbError);
-            throw new Error(`Failed to save wallet to database: ${dbError.message}`);
-          }
-          
-          if (!dbWallet) {
-            throw new Error("Failed to save wallet to database: No data returned");
+          if (dbError || !dbWallet) {
+            throw new Error(`Failed to save wallet to database: ${dbError?.message ?? "No data returned"}`);
           }
 
           circleWallet = dbWallet;
-          console.log(`✅ Auto-created Circle wallet on ${destinationChain}: ${newWallet.address}`);
         } catch (error) {
           console.error("Failed to auto-create Circle wallet:", error);
           return NextResponse.json(
             {
               error: "Failed to create wallet on destination chain",
               userMessage: `Could not automatically create a wallet on ${CHAIN_LABELS[destinationChain]}. Please try creating one manually. The burn intent has been submitted (Transfer ID: ${transferId}).`,
-              details: error instanceof Error ? error.message : String(error)
+              details: error instanceof Error ? error.message : String(error),
             },
             { status: 500 }
           );
@@ -699,10 +645,7 @@ export const POST = withAuth(async (req, { user, supabase }) => {
       }
 
       const walletAddress = await getCircleWalletAddress(circleWallet.circle_wallet_id);
-      
-      console.log(`Executing mint on ${destinationChain} using Circle wallet ${walletAddress} (${circleWallet.circle_wallet_id})...`);
-      
-      // Step 2: Execute mint on destination using Circle wallet
+
       let mintTx;
       try {
         mintTx = await executeGatewayMint(
@@ -713,14 +656,13 @@ export const POST = withAuth(async (req, { user, supabase }) => {
         );
       } catch (mintError) {
         const mintErrorMessage = mintError instanceof Error ? mintError.message : String(mintError);
-        // Check if it's a gas error
-        if (mintErrorMessage.includes('insufficient') || mintErrorMessage.includes('native tokens')) {
+        if (mintErrorMessage.includes("insufficient") || mintErrorMessage.includes("native tokens")) {
           return NextResponse.json(
-            { 
+            {
               success: false,
               partialSuccess: true,
               error: "Wallet needs gas to complete transfer",
-              userMessage: `The burn was successful! However, the destination wallet needs native tokens (gas) to complete the mint. Please send ~0.001 ${destinationChain === 'baseSepolia' ? 'Base Sepolia ETH' : destinationChain === 'ethSepolia' ? 'Sepolia ETH' : destinationChain === 'avalancheFuji' ? 'AVAX' : 'ARC'} to ${walletAddress}, then retry the transfer to complete it. Burn ID: ${transferId}`,
+              userMessage: `The burn was successful! However, the destination wallet needs native tokens (gas) to complete the mint. Please send ~0.001 ${destinationChain === "baseSepolia" ? "Base Sepolia ETH" : destinationChain === "ethSepolia" ? "Sepolia ETH" : destinationChain === "avalancheFuji" ? "AVAX" : "ARC"} to ${walletAddress}, then retry the transfer to complete it. Burn ID: ${transferId}`,
               txId: transferId,
               routing: {
                 strategy: "gateway",
@@ -730,7 +672,7 @@ export const POST = withAuth(async (req, { user, supabase }) => {
               },
               settlement: {
                 estimatedTimeSeconds: estimatedTime,
-                estimatedTimeFriendly: estimatedTime < 60 
+                estimatedTimeFriendly: estimatedTime < 60
                   ? `~${estimatedTime} seconds`
                   : `~${Math.ceil(estimatedTime / 60)} minutes`,
                 estimatedFeeUSDC: estimatedFee,
@@ -740,24 +682,22 @@ export const POST = withAuth(async (req, { user, supabase }) => {
                 transferId,
                 walletAddress,
                 chain: destinationChain,
-                status: 'burn_complete_mint_pending',
-              }
+                status: "burn_complete_mint_pending",
+              },
             },
             { status: 202 }
           );
         }
         throw mintError;
       }
-      
+
       txId = transferId;
       txHash = mintTx.txHash as string;
-      console.log(`Gateway transfer completed. Mint TX: ${txHash}`);
     } else {
-      // Reaching here with a non-USDC currency is already guaranteed to be an
-      // explicit same-chain wallet payout — the guards above 400 on every other
-      // combination — so the requested currency is honored as-is. "auto" that
-      // resolves to a same-chain wallet still lands here, but it can only ever
-      // have asked for USDC.
+      if (!sourceWallet) {
+        return NextResponse.json({ error: "Source wallet unavailable" }, { status: 500 });
+      }
+
       transactionCurrency = sourceType === "wallet" ? requestedCurrency : "USDC";
       try {
         const sameChainSendResult = await sendUsdcOnSameChainWithAppKit({
@@ -772,9 +712,7 @@ export const POST = withAuth(async (req, { user, supabase }) => {
         txHash = sameChainSendResult.txHash;
 
         if (sameChainSendResult.estimatedFee) {
-          const parsedEstimatedFee = Number.parseFloat(
-            sameChainSendResult.estimatedFee
-          );
+          const parsedEstimatedFee = Number.parseFloat(sameChainSendResult.estimatedFee);
           if (Number.isFinite(parsedEstimatedFee)) {
             estimatedFee = parsedEstimatedFee;
           }
@@ -791,7 +729,10 @@ export const POST = withAuth(async (req, { user, supabase }) => {
       }
     }
 
-    // Log transaction
+    if (!sourceWallet) {
+      return NextResponse.json({ error: "Source wallet unavailable" }, { status: 500 });
+    }
+
     await supabase.from("transactions").insert([
       {
         user_id: user.id,
@@ -818,20 +759,16 @@ export const POST = withAuth(async (req, { user, supabase }) => {
       },
       settlement: {
         estimatedTimeSeconds: estimatedTime,
-        estimatedTimeFriendly: estimatedTime < 60 
+        estimatedTimeFriendly: estimatedTime < 60
           ? `~${estimatedTime} seconds`
           : `~${Math.ceil(estimatedTime / 60)} minutes`,
         estimatedFeeUSDC: estimatedFee,
         guaranteed: strategy === "same-chain",
       },
     });
-
   } catch (error) {
     console.error("Payout error:", error);
 
-    // If we hit our polling ceiling, the underlying transfer is still in flight
-    // upstream (Circle / Gateway). Surface a 202 so the client can poll for
-    // completion via /api/bridge/monitor or refresh, instead of a misleading 500.
     if (error instanceof PollingTimeoutError) {
       return NextResponse.json(
         {
@@ -851,7 +788,6 @@ export const POST = withAuth(async (req, { user, supabase }) => {
     if (error instanceof Error && error.message) {
       errorMessage = error.message;
 
-      // Provide user-friendly messages for common errors
       if (errorMessage.includes("Insufficient native token")) {
         userFriendlyMessage = "The source wallet needs native tokens (gas) to pay for transaction fees. Please add native tokens to your wallet.";
       } else if (errorMessage.includes("Insufficient funds")) {
