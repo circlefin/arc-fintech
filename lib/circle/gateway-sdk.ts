@@ -59,7 +59,7 @@ export const arcTestnet = {
     default: { http: [arcRpcUrl] },
   },
   blockExplorers: {
-    default: { name: 'Explorer', url: 'https://explorer.arc.testnet.circle.com' },
+    default: { name: 'Explorer', url: 'https://testnet.arcscan.app' },
   },
   testnet: true,
 } as const satisfies Chain;
