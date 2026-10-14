@@ -48,8 +48,8 @@ export const GATEWAY_MINTER_ADDRESS = "0x0022222ABE238Cc2C7Bb1f21003F0a260052475
 // commit a shared secret to source control.
 const arcRpcKey = process.env.ARC_TESTNET_RPC_KEY;
 const arcRpcUrl = arcRpcKey
-  ? `https://rpc.testnet.arc.network/${arcRpcKey}`
-  : "https://rpc.testnet.arc.network";
+  ? `https://rpc.testnet.arc.io/${arcRpcKey}`
+  : "https://rpc.testnet.arc.io";
 
 export const arcTestnet = {
   id: 5042002,
