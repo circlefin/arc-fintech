@@ -112,6 +112,24 @@ export function shouldBlockTransfer(result: ComplianceResult): boolean {
 }
 
 /**
+ * Screen a transfer recipient on the server. Any failure to complete the
+ * screening (missing API key, network error, non-2xx from Circle) is reported
+ * as ERROR so that callers using `shouldBlockTransfer()` fail closed.
+ */
+export async function screenRecipientForTransfer(
+  address: string,
+  chain: string
+): Promise<ComplianceResult> {
+  try {
+    const circleResponse = await screenAddress(address, chain);
+    return mapComplianceResult(circleResponse);
+  } catch (error) {
+    console.error('Recipient compliance screening failed:', error);
+    return 'ERROR';
+  }
+}
+
+/**
  * Format compliance check response for UI consumption
  */
 export function formatComplianceResponse(
