@@ -83,6 +83,8 @@ The dashboard is organized into a set of pages, each backed by Circle APIs:
 
    </details>
 
+   When a pull request changes the Supabase migrations, [RattleCheck](.github/workflows/rattlecheck.yml) compares the proposed SQL permissions with the base branch. It flags new high or critical findings at the migration line before you apply the SQL locally or in the cloud. It needs no Supabase or Circle credentials.
+
 4. Start the development server:
 
    ```bash
